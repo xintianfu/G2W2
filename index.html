@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+  />
+  <title>Quest 3 Snapshot Panel MVP</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div id="ui">
+    <div class="panel">
+      <h1>Snapshot Panel MVP</h1>
+      <p>
+        1. Start camera
+        2. Enter AR
+        3. Take snapshot
+        4. Drag or draw on the panel
+      </p>
+
+      <div class="row">
+        <button id="startCameraBtn">Start Camera</button>
+        <button id="takeSnapshotBtn">Take Snapshot</button>
+        <button id="toggleDrawBtn">Draw: OFF</button>
+        <button id="clearBtn">Clear Ink</button>
+      </div>
+
+      <p id="status">Status: idle</p>
+      <p class="hint">
+        In XR:
+        <br />
+        - Draw mode ON: touch / ray on panel to ink
+        <br />
+        - Draw mode OFF: touch / ray on panel to drag
+      </p>
+    </div>
+  </div>
+
+  <video id="cameraVideo" autoplay playsinline muted></video>
+  <canvas id="renderCanvas"></canvas>
+
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script src="https://cdn.babylonjs.com/gui/babylon.gui.min.js"></script>
+  <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
