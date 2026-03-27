@@ -137,15 +137,7 @@ function drawPlaceholder() {
   ctx.fillText("Draw OFF = drag, Draw ON = ink", 110, 400);
 
   snapshotTexture.update();
-
-  previewCtx.clearRect(0, 0, snapshotPreview.width, snapshotPreview.height);
-  previewCtx.drawImage(
-    snapshotTexture.getContext().canvas,
-    0,
-    0,
-    snapshotPreview.width,
-    snapshotPreview.height
-  );
+  updatePreviewFromTexture();
 }
 
 async function initXR() {
@@ -228,8 +220,6 @@ function spawnPanelOnRight() {
     : cam.position.clone();
 
   const forward = cam.getForwardRay(1).direction.normalize();
-
-  // 调试友好的版本：正前方出现
   const targetPos = camPos.add(forward.scale(0.8));
 
   snapshotPanel.position.copyFrom(targetPos);
@@ -240,24 +230,112 @@ function spawnPanelOnRight() {
   console.log("Panel spawned in front:", snapshotPanel.position.toString());
 }
 
+async function stopCurrentCameraStream() {
+  if (currentCameraStream) {
+    currentCameraStream.getTracks().forEach((track) => track.stop());
+    currentCameraStream = null;
+  }
+  video.srcObject = null;
+}
+
+async function debugCameraInfo() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videoInputs = devices.filter((d) => d.kind === "videoinput");
+
+    console.log("=== Video input devices ===");
+    videoInputs.forEach((d, i) => {
+      console.log(i, {
+        label: d.label,
+        deviceId: d.deviceId,
+        groupId: d.groupId,
+      });
+    });
+
+    if (video.srcObject) {
+      const track = video.srcObject.getVideoTracks()[0];
+      if (track) {
+        console.log("=== Selected video track label ===");
+        console.log(track.label);
+
+        console.log("=== Selected video track settings ===");
+        console.log(track.getSettings());
+
+        console.log("=== Selected video track constraints ===");
+        console.log(track.getConstraints());
+      }
+    }
+  } catch (err) {
+    console.error("debugCameraInfo failed:", err);
+  }
+}
+
+async function requestEnvironmentCameraExact() {
+  return navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: { exact: "environment" },
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+    },
+    audio: false,
+  });
+}
+
+async function requestEnvironmentCameraPreferred() {
+  return navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: "environment",
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+    },
+    audio: false,
+  });
+}
+
+async function requestAnyCamera() {
+  return navigator.mediaDevices.getUserMedia({
+    video: {
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+    },
+    audio: false,
+  });
+}
+
 async function startCamera() {
   try {
     setStatus("Requesting camera permission...");
+    await stopCurrentCameraStream();
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: "environment",
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-      },
-      audio: false,
-    });
+    let stream = null;
+
+    try {
+      console.log("Trying exact environment camera...");
+      stream = await requestEnvironmentCameraExact();
+      console.log("Exact environment camera success");
+    } catch (err1) {
+      console.warn("Exact environment camera failed:", err1);
+
+      try {
+        console.log("Trying preferred environment camera...");
+        stream = await requestEnvironmentCameraPreferred();
+        console.log("Preferred environment camera success");
+      } catch (err2) {
+        console.warn("Preferred environment camera failed:", err2);
+
+        console.log("Falling back to any available camera...");
+        stream = await requestAnyCamera();
+        console.log("Fallback camera success");
+      }
+    }
 
     currentCameraStream = stream;
     video.srcObject = stream;
     video.style.display = "block";
 
     await video.play();
+    await debugCameraInfo();
+
     setStatus("Camera ready");
   } catch (err) {
     console.error(err);
@@ -304,7 +382,7 @@ function takeSnapshotFromVideo() {
   ctx.drawImage(video, offsetX, offsetY, drawWidth, drawHeight);
 
   ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
-  ctx.fillRect(24, 24, 370, 84);
+  ctx.fillRect(24, 24, 420, 96);
   ctx.fillStyle = "white";
   ctx.font = "bold 36px Arial";
   ctx.fillText("Snapshot", 46, 72);
@@ -312,17 +390,9 @@ function takeSnapshotFromVideo() {
   ctx.fillText(new Date().toLocaleTimeString(), 46, 102);
 
   snapshotTexture.update();
-
-  previewCtx.clearRect(0, 0, snapshotPreview.width, snapshotPreview.height);
-  previewCtx.drawImage(
-    snapshotTexture.getContext().canvas,
-    0,
-    0,
-    snapshotPreview.width,
-    snapshotPreview.height
-  );
-
+  updatePreviewFromTexture();
   spawnPanelOnRight();
+
   console.log("Snapshot drawn to texture");
   setStatus("Snapshot created");
 }
@@ -338,6 +408,17 @@ function saveSnapshotToFile() {
   link.download = `snapshot-${Date.now()}.png`;
   link.click();
   setStatus("Snapshot PNG downloaded");
+}
+
+function updatePreviewFromTexture() {
+  previewCtx.clearRect(0, 0, snapshotPreview.width, snapshotPreview.height);
+  previewCtx.drawImage(
+    snapshotTexture.getContext().canvas,
+    0,
+    0,
+    snapshotPreview.width,
+    snapshotPreview.height
+  );
 }
 
 function getPanelUVFromPointer(pointerInfo) {
@@ -399,17 +480,6 @@ function drawLineUV(uv1, uv2) {
 
   snapshotTexture.update();
   updatePreviewFromTexture();
-}
-
-function updatePreviewFromTexture() {
-  previewCtx.clearRect(0, 0, snapshotPreview.width, snapshotPreview.height);
-  previewCtx.drawImage(
-    snapshotTexture.getContext().canvas,
-    0,
-    0,
-    snapshotPreview.width,
-    snapshotPreview.height
-  );
 }
 
 function updateDraggedPanel() {
