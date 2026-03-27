@@ -5,7 +5,13 @@ const startCameraBtn = document.getElementById("startCameraBtn");
 const takeSnapshotBtn = document.getElementById("takeSnapshotBtn");
 const toggleDrawBtn = document.getElementById("toggleDrawBtn");
 const clearBtn = document.getElementById("clearBtn");
+const saveSnapshotBtn = document.getElementById("saveSnapshotBtn");
 const statusEl = document.getElementById("status");
+
+const snapshotPreview = document.getElementById("snapshotPreview");
+const previewCtx = snapshotPreview.getContext("2d");
+snapshotPreview.width = 512;
+snapshotPreview.height = 512;
 
 let engine;
 let scene;
@@ -22,6 +28,16 @@ let isDragging = false;
 
 let lastUV = null;
 let currentCameraStream = null;
+
+// Hand tracking / pinch
+let handTrackingFeature = null;
+let leftHandInput = null;
+let rightHandInput = null;
+let pinchThreshold = 0.025; // 2.5 cm
+let pinchCooldownMs = 1200;
+let lastPinchTime = 0;
+let wasPinchingLeft = false;
+let wasPinchingRight = false;
 
 const PANEL_TEX_WIDTH = 1024;
 const PANEL_TEX_HEIGHT = 1024;
@@ -52,17 +68,17 @@ function createScene() {
   );
   light.intensity = 1.0;
 
-  const env = BABYLON.MeshBuilder.CreateGround(
+  const ground = BABYLON.MeshBuilder.CreateGround(
     "ground",
     { width: 8, height: 8 },
     scene
   );
-  env.position.y = 0;
+  ground.position.y = 0;
 
   const groundMat = new BABYLON.StandardMaterial("groundMat", scene);
   groundMat.diffuseColor = new BABYLON.Color3(0.18, 0.18, 0.2);
   groundMat.alpha = 0.35;
-  env.material = groundMat;
+  ground.material = groundMat;
 
   createSnapshotPanel();
 
@@ -92,8 +108,6 @@ function createSnapshotPanel() {
   snapshotTexture.hasAlpha = false;
 
   snapshotTextureCtx = snapshotTexture.getContext();
-
-  // Initial placeholder
   drawPlaceholder();
 
   snapshotMaterial = new BABYLON.StandardMaterial("snapshotMat", scene);
@@ -119,10 +133,19 @@ function drawPlaceholder() {
 
   ctx.font = "34px Arial";
   ctx.fillText("Start camera and take snapshot", 110, 260);
-  ctx.fillText("Draw mode OFF = drag panel", 110, 330);
-  ctx.fillText("Draw mode ON = ink on panel", 110, 400);
+  ctx.fillText("Quest: pinch to trigger snapshot", 110, 330);
+  ctx.fillText("Draw OFF = drag, Draw ON = ink", 110, 400);
 
   snapshotTexture.update();
+
+  previewCtx.clearRect(0, 0, snapshotPreview.width, snapshotPreview.height);
+  previewCtx.drawImage(
+    snapshotTexture.getContext().canvas,
+    0,
+    0,
+    snapshotPreview.width,
+    snapshotPreview.height
+  );
 }
 
 async function initXR() {
@@ -154,14 +177,32 @@ async function initXR() {
 
 function tryEnableHandTracking() {
   try {
-    xrHelper.baseExperience.featuresManager.enableFeature(
+    handTrackingFeature = xrHelper.baseExperience.featuresManager.enableFeature(
       BABYLON.WebXRFeatureName.HAND_TRACKING,
       "latest",
       {
         xrInput: xrHelper.input,
       }
     );
+
     console.log("Hand tracking feature requested.");
+
+    xrHelper.input.onControllerAddedObservable.add((inputSource) => {
+      if (inputSource.inputSource && inputSource.inputSource.hand) {
+        if (inputSource.inputSource.handedness === "left") {
+          leftHandInput = inputSource;
+          console.log("Left hand detected");
+        } else if (inputSource.inputSource.handedness === "right") {
+          rightHandInput = inputSource;
+          console.log("Right hand detected");
+        }
+      }
+    });
+
+    xrHelper.input.onControllerRemovedObservable.add((inputSource) => {
+      if (leftHandInput === inputSource) leftHandInput = null;
+      if (rightHandInput === inputSource) rightHandInput = null;
+    });
   } catch (err) {
     console.warn("Hand tracking not enabled:", err);
   }
@@ -187,19 +228,16 @@ function spawnPanelOnRight() {
     : cam.position.clone();
 
   const forward = cam.getForwardRay(1).direction.normalize();
-  const up = new BABYLON.Vector3(0, 1, 0);
-  const right = BABYLON.Vector3.Cross(forward, up).normalize();
 
-  const targetPos = camPos
-    .add(forward.scale(0.55))
-    .add(right.scale(0.35))
-    .add(up.scale(-0.05));
+  // 调试友好的版本：正前方出现
+  const targetPos = camPos.add(forward.scale(0.8));
 
   snapshotPanel.position.copyFrom(targetPos);
   snapshotPanel.lookAt(camPos);
   snapshotPanel.rotate(BABYLON.Axis.Y, Math.PI, BABYLON.Space.LOCAL);
-
   snapshotPanel.setEnabled(true);
+
+  console.log("Panel spawned in front:", snapshotPanel.position.toString());
 }
 
 async function startCamera() {
@@ -228,6 +266,9 @@ async function startCamera() {
 }
 
 function takeSnapshotFromVideo() {
+  console.log("Take snapshot clicked");
+  console.log("video size:", video.videoWidth, video.videoHeight);
+
   if (!video.videoWidth || !video.videoHeight) {
     setStatus("No camera frame available, using placeholder");
     drawPlaceholder();
@@ -236,8 +277,6 @@ function takeSnapshotFromVideo() {
   }
 
   const ctx = snapshotTextureCtx;
-
-  // draw camera frame
   ctx.clearRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
 
   const videoAspect = video.videoWidth / video.videoHeight;
@@ -264,7 +303,6 @@ function takeSnapshotFromVideo() {
   ctx.fillRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
   ctx.drawImage(video, offsetX, offsetY, drawWidth, drawHeight);
 
-  // overlay title
   ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
   ctx.fillRect(24, 24, 370, 84);
   ctx.fillStyle = "white";
@@ -274,13 +312,32 @@ function takeSnapshotFromVideo() {
   ctx.fillText(new Date().toLocaleTimeString(), 46, 102);
 
   snapshotTexture.update();
+
+  previewCtx.clearRect(0, 0, snapshotPreview.width, snapshotPreview.height);
+  previewCtx.drawImage(
+    snapshotTexture.getContext().canvas,
+    0,
+    0,
+    snapshotPreview.width,
+    snapshotPreview.height
+  );
+
   spawnPanelOnRight();
+  console.log("Snapshot drawn to texture");
   setStatus("Snapshot created");
 }
 
 function clearInkOnly() {
-  // Recreate snapshot from the current video frame if available
   takeSnapshotFromVideo();
+}
+
+function saveSnapshotToFile() {
+  const dataUrl = snapshotTexture.getContext().canvas.toDataURL("image/png");
+  const link = document.createElement("a");
+  link.href = dataUrl;
+  link.download = `snapshot-${Date.now()}.png`;
+  link.click();
+  setStatus("Snapshot PNG downloaded");
 }
 
 function getPanelUVFromPointer(pointerInfo) {
@@ -292,18 +349,22 @@ function getPanelUVFromPointer(pointerInfo) {
     if (uv) return uv;
   }
 
-  return pointerInfo.pickInfo.bu !== undefined && pointerInfo.pickInfo.bv !== undefined
-    ? new BABYLON.Vector2(pointerInfo.pickInfo.bu, pointerInfo.pickInfo.bv)
-    : null;
+  if (
+    pointerInfo.pickInfo.bu !== undefined &&
+    pointerInfo.pickInfo.bv !== undefined
+  ) {
+    return new BABYLON.Vector2(pointerInfo.pickInfo.bu, pointerInfo.pickInfo.bv);
+  }
+
+  return null;
 }
 
 function uvToCanvasPoint(uv) {
   if (!uv) return null;
-
-  const x = uv.x * PANEL_TEX_WIDTH;
-  const y = (1 - uv.y) * PANEL_TEX_HEIGHT;
-
-  return { x, y };
+  return {
+    x: uv.x * PANEL_TEX_WIDTH,
+    y: (1 - uv.y) * PANEL_TEX_HEIGHT,
+  };
 }
 
 function drawDotAtUV(uv) {
@@ -315,7 +376,9 @@ function drawDotAtUV(uv) {
   ctx.beginPath();
   ctx.arc(pt.x, pt.y, 6, 0, Math.PI * 2);
   ctx.fill();
+
   snapshotTexture.update();
+  updatePreviewFromTexture();
 }
 
 function drawLineUV(uv1, uv2) {
@@ -335,6 +398,18 @@ function drawLineUV(uv1, uv2) {
   ctx.stroke();
 
   snapshotTexture.update();
+  updatePreviewFromTexture();
+}
+
+function updatePreviewFromTexture() {
+  previewCtx.clearRect(0, 0, snapshotPreview.width, snapshotPreview.height);
+  previewCtx.drawImage(
+    snapshotTexture.getContext().canvas,
+    0,
+    0,
+    snapshotPreview.width,
+    snapshotPreview.height
+  );
 }
 
 function updateDraggedPanel() {
@@ -349,7 +424,7 @@ function updateDraggedPanel() {
 
   const forward = cam.getForwardRay(1).direction.normalize();
 
-  snapshotPanel.position.copyFrom(camPos.add(forward.scale(0.5)));
+  snapshotPanel.position.copyFrom(camPos.add(forward.scale(0.55)));
   snapshotPanel.lookAt(camPos);
   snapshotPanel.rotate(BABYLON.Axis.Y, Math.PI, BABYLON.Space.LOCAL);
 }
@@ -397,6 +472,89 @@ function setupPointerLogic() {
   });
 }
 
+function getXRFrame() {
+  if (!xrHelper || !xrHelper.baseExperience || !xrHelper.baseExperience.sessionManager) {
+    return null;
+  }
+  return xrHelper.baseExperience.sessionManager.currentFrame || null;
+}
+
+function getXRReferenceSpace() {
+  if (!xrHelper || !xrHelper.baseExperience || !xrHelper.baseExperience.sessionManager) {
+    return null;
+  }
+
+  return (
+    xrHelper.baseExperience.sessionManager.referenceSpace ||
+    xrHelper.baseExperience.sessionManager.baseReferenceSpace ||
+    null
+  );
+}
+
+function getJointPosition(handInput, jointName) {
+  try {
+    if (!handInput || !handInput.inputSource || !handInput.inputSource.hand) {
+      return null;
+    }
+
+    const jointSpace = handInput.inputSource.hand.get(jointName);
+    if (!jointSpace) return null;
+
+    const xrFrame = getXRFrame();
+    const referenceSpace = getXRReferenceSpace();
+
+    if (!xrFrame || !referenceSpace) return null;
+
+    const jointPose = xrFrame.getJointPose(jointSpace, referenceSpace);
+    if (!jointPose) return null;
+
+    const p = jointPose.transform.position;
+    return new BABYLON.Vector3(p.x, p.y, p.z);
+  } catch (err) {
+    return null;
+  }
+}
+
+function detectPinch(handInput) {
+  const thumbTip = getJointPosition(handInput, "thumb-tip");
+  const indexTip = getJointPosition(handInput, "index-finger-tip");
+
+  if (!thumbTip || !indexTip) return false;
+
+  const distance = BABYLON.Vector3.Distance(thumbTip, indexTip);
+  return distance < pinchThreshold;
+}
+
+function maybeTriggerSnapshotFromPinch() {
+  if (
+    !xrHelper ||
+    !xrHelper.baseExperience ||
+    xrHelper.baseExperience.state !== BABYLON.WebXRState.IN_XR
+  ) {
+    return;
+  }
+
+  const now = performance.now();
+
+  const leftPinching = detectPinch(leftHandInput);
+  const rightPinching = detectPinch(rightHandInput);
+
+  const leftRisingEdge = leftPinching && !wasPinchingLeft;
+  const rightRisingEdge = rightPinching && !wasPinchingRight;
+
+  if (
+    (leftRisingEdge || rightRisingEdge) &&
+    now - lastPinchTime > pinchCooldownMs
+  ) {
+    lastPinchTime = now;
+    takeSnapshotFromVideo();
+    setStatus("Snapshot triggered by pinch");
+  }
+
+  wasPinchingLeft = leftPinching;
+  wasPinchingRight = rightPinching;
+}
+
 async function bootstrap() {
   engine = new BABYLON.Engine(canvas, true, {
     preserveDrawingBuffer: true,
@@ -408,6 +566,7 @@ async function bootstrap() {
   await initXR();
 
   engine.runRenderLoop(() => {
+    maybeTriggerSnapshotFromPinch();
     updateDraggedPanel();
     scene.render();
   });
@@ -433,6 +592,10 @@ toggleDrawBtn.addEventListener("click", () => {
 
 clearBtn.addEventListener("click", () => {
   clearInkOnly();
+});
+
+saveSnapshotBtn.addEventListener("click", () => {
+  saveSnapshotToFile();
 });
 
 window.addEventListener("keydown", (e) => {

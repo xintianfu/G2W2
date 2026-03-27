@@ -81,3 +81,15 @@ button:hover {
   background: black;
   display: none;
 }
+
+#snapshotPreview {
+  position: fixed;
+  right: 16px;
+  top: 156px;
+  width: 220px;
+  height: 220px;
+  border-radius: 10px;
+  z-index: 9;
+  background: #222;
+  display: block;
+}

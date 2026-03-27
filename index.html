@@ -12,12 +12,24 @@
 <body>
   <div id="ui">
     <div class="panel">
-      <h1>Snapshot Panel MVP</h1>
+      <h1>Quest 3 Snapshot Panel</h1>
       <p>
-        1. Start camera
-        2. Enter AR
-        3. Take snapshot
-        4. Drag or draw on the panel
+        电脑调试：
+        <br />
+        1. Start Camera
+        <br />
+        2. Take Snapshot
+        <br />
+        3. Draw ON/OFF
+      </p>
+      <p>
+        Quest 3：
+        <br />
+        1. Start Camera
+        <br />
+        2. 进入 AR
+        <br />
+        3. 用 pinch 触发截图
       </p>
 
       <div class="row">
@@ -25,20 +37,22 @@
         <button id="takeSnapshotBtn">Take Snapshot</button>
         <button id="toggleDrawBtn">Draw: OFF</button>
         <button id="clearBtn">Clear Ink</button>
+        <button id="saveSnapshotBtn">Save PNG</button>
       </div>
 
       <p id="status">Status: idle</p>
       <p class="hint">
-        In XR:
+        Draw OFF：点击/按住 panel = 跟随到前面
         <br />
-        - Draw mode ON: touch / ray on panel to ink
+        Draw ON：在 panel 上画线
         <br />
-        - Draw mode OFF: touch / ray on panel to drag
+        Quest 中可用 pinch 触发 snapshot
       </p>
     </div>
   </div>
 
   <video id="cameraVideo" autoplay playsinline muted></video>
+  <canvas id="snapshotPreview"></canvas>
   <canvas id="renderCanvas"></canvas>
 
   <script src="https://cdn.babylonjs.com/babylon.js"></script>
