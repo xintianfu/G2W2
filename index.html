@@ -6,47 +6,22 @@
     name="viewport"
     content="width=device-width, initial-scale=1.0, viewport-fit=cover"
   />
-  <title>Quest 3 Snapshot Panel MVP</title>
+  <title>Quest Snapshot Panel</title>
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
-  <div id="ui">
-    <div class="panel">
-      <h1>Quest 3 Snapshot Panel</h1>
+  <div id="hud">
+    <div class="hud-card">
+      <h1>Snapshot Panel</h1>
+      <p id="status">Status: loading...</p>
       <p>
-        电脑调试：
+        XR logic:
         <br />
-        1. Start Camera
+        pinch = update snapshot
         <br />
-        2. Take Snapshot
+        fist near panel = move panel
         <br />
-        3. Draw ON/OFF
-      </p>
-      <p>
-        Quest 3：
-        <br />
-        1. Start Camera
-        <br />
-        2. 进入 AR
-        <br />
-        3. 用 pinch 触发截图
-      </p>
-
-      <div class="row">
-        <button id="startCameraBtn">Start Camera</button>
-        <button id="takeSnapshotBtn">Take Snapshot</button>
-        <button id="toggleDrawBtn">Draw: OFF</button>
-        <button id="clearBtn">Clear Ink</button>
-        <button id="saveSnapshotBtn">Save PNG</button>
-      </div>
-
-      <p id="status">Status: idle</p>
-      <p class="hint">
-        Draw OFF：点击/按住 panel = 跟随到前面
-        <br />
-        Draw ON：在 panel 上画线
-        <br />
-        Quest 中可用 pinch 触发 snapshot
+        poke panel = toggle draw mode
       </p>
     </div>
   </div>
@@ -57,7 +32,6 @@
 
   <script src="https://cdn.babylonjs.com/babylon.js"></script>
   <script src="https://cdn.babylonjs.com/gui/babylon.gui.min.js"></script>
-  <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>
