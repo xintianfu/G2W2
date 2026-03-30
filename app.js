@@ -79,7 +79,8 @@ function updateLoop() {
                 const distToPanel = BABYLON.Vector3.Distance(palmPos, snapshotPanel.position);
 
                 // 触发抓取：在50cm范围内且握拳
-                if (distToPanel < GRAB_RANGE && isFist) {
+                if (isFist) {
+                //if (distToPanel < GRAB_RANGE && isFist) {
                     if (!isGrabbingLeft) {
                         isGrabbingLeft = true;
                         snapshotMaterial.emissiveColor = new BABYLON.Color3(0, 0.8, 1); // 变蓝反馈
