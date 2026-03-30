@@ -11,7 +11,7 @@ let wasPinchingRight = false;
 let lastPinchTime = 0;
 
 // 配置参数
-const PINCH_THRESHOLD = 0.04; 
+const PINCH_THRESHOLD = 0.02; 
 const COOLDOWN = 1000; 
 const PANEL_TEX_SIZE = 1024;
 const PANEL_WORLD_WIDTH = 0.42;
