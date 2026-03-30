@@ -7,14 +7,12 @@ let snapshotPanel, snapshotMaterial, snapshotTexture, snapshotTextureCtx;
 
 // 交互状态
 let isGrabbingLeft = false; 
-let wasPinchingRight = false;
-let lastPinchTime = 0;
-let isDrawingRight = false; 
+let isDrawingRight = false; // 是否正在绘图
+let lastSnapshotTime = 0;
 let lastDrawUV = null;
 
 // 配置参数
-const PINCH_THRESHOLD = 0.04; 
-const COOLDOWN = 1000; 
+const SNAPSHOT_COOLDOWN = 1500; // 截图冷却
 const PANEL_TEX_SIZE = 1024;
 const PANEL_WORLD_WIDTH = 0.42;
 const PANEL_WORLD_HEIGHT = 0.28;
@@ -24,36 +22,26 @@ function setStatus(text) {
 }
 
 /**
- * 【核心修正】坐标矫正函数
- * 解决 WebXR 镜像对称导致坐标点出现在身后或方向相反的问题
+ * 【左手专用】镜像坐标矫正
+ * 仅用于搬运，将身后的坐标拉回身前
  */
-function getCorrectedPoint(controller, jointName) {
-    let rawPos = null;
-    if (controller?.inputSource?.hand) {
-        const joint = controller.inputSource.hand.get(jointName);
-        const frame = xrHelper?.baseExperience?.sessionManager?.currentFrame;
-        const ref = xrHelper?.baseExperience?.sessionManager?.referenceSpace;
-        if (frame && joint && ref) {
-            const pose = frame.getJointPose(joint, ref);
-            if (pose) rawPos = new BABYLON.Vector3(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
-        }
-    }
-    if (!rawPos) rawPos = controller.pointer.position.clone();
-
-    // 关键：通过反转 X 和 Z 轴，把镜像到身后的坐标拉回到面前
+function getCorrectedLeftPos(controller) {
+    let rawPos = controller.pointer.position;
+    // 强制执行 X 和 Z 轴镜像翻转
     return new BABYLON.Vector3(-rawPos.x, rawPos.y, -rawPos.z);
 }
 
 /**
- * 【动态截图】修正内容镜像并强制刷新
+ * 【动态截图】修正镜像并重置内容
  */
 function takeSnapshot() {
     if (!video.videoWidth || video.readyState < 2) return;
+    
     const ctx = snapshotTextureCtx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, PANEL_TEX_SIZE, PANEL_TEX_SIZE);
     
-    // 修正内容左右反转，让快照里的文字是正的
+    // 修正内容镜像，让文字变正
     ctx.save();
     ctx.translate(PANEL_TEX_SIZE, 0);
     ctx.scale(-1, 1); 
@@ -62,6 +50,7 @@ function takeSnapshot() {
     
     snapshotTexture.update();
     
+    // 面板出现在相机正前方 0.5m
     const cam = xrHelper.baseExperience.camera;
     const forward = cam.getForwardRay(1).direction;
     snapshotPanel.position = cam.globalPosition.add(forward.scale(0.5));
@@ -71,42 +60,18 @@ function takeSnapshot() {
 }
 
 /**
- * 【物理绘图】计算食指与面板的接触
+ * 【射线绘画】基于蓝色圆点落点的绘图逻辑
  */
-function handleDrawing(fingerPos) {
-    // 将指尖世界坐标转为面板局部坐标
-    const invMat = snapshotPanel.getWorldMatrix().clone().invert();
-    const localPos = BABYLON.Vector3.TransformCoordinates(fingerPos, invMat);
-
-    // 判定：在面板平面范围内，且垂直距离小于 2 厘米
-    const inBounds = Math.abs(localPos.x) < 0.21 && Math.abs(localPos.y) < 0.14;
-    const isTouching = Math.abs(localPos.z) < 0.02;
-
-    if (inBounds && isTouching) {
-        // 计算 UV (0-1)
-        const uv = new BABYLON.Vector2(
-            (localPos.x + 0.21) / 0.42,
-            (localPos.y + 0.14) / 0.28
-        );
-        
-        drawOnPanel(uv, !isDrawingRight);
-        isDrawingRight = true;
-    } else {
-        isDrawingRight = false;
-        lastDrawUV = null;
-    }
-}
-
-function drawOnPanel(uv, isNewPath) {
+function drawByRay(uv, isNewPath) {
     const ctx = snapshotTextureCtx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     
-    // 适配镜像后的纹理 X 轴
+    // 适配镜像纹理：将 UV 坐标映射到像素点
     const x = (1 - uv.x) * PANEL_TEX_SIZE;
     const y = (1 - uv.y) * PANEL_TEX_SIZE;
 
     ctx.strokeStyle = "#ff3b30";
-    ctx.lineWidth = 10;
+    ctx.lineWidth = 12;
     ctx.lineCap = "round";
 
     if (isNewPath || !lastDrawUV) {
@@ -132,52 +97,67 @@ function updateLoop() {
 
     xrHelper.input.controllers.forEach((controller) => {
         const side = controller.inputSource.handedness;
-        const thumb = getCorrectedPoint(controller, "thumb-tip");
-        const index = getCorrectedPoint(controller, "index-finger-tip");
-        
-        if (!thumb || !index) return;
+        // 检测按下状态 (Pinch 在模拟控制器模式下对应按钮 0)
+        const isTriggered = controller.inputSource.gamepad?.buttons[0]?.pressed;
 
-        const dist = BABYLON.Vector3.Distance(thumb, index);
-        const isPinching = dist < PINCH_THRESHOLD;
-        const pinchCenter = BABYLON.Vector3.Center(thumb, index);
-
+        // --- 左手：镜像吸附搬运 ---
         if (side === "left") {
-            // 左手逻辑：吸附搬运
-            if (isPinching && snapshotPanel.isEnabled()) {
+            if (isTriggered && snapshotPanel.isEnabled()) {
                 isGrabbingLeft = true;
-                snapshotMaterial.emissiveColor = new BABYLON.Color3(0, 0.7, 1);
-                snapshotPanel.setAbsolutePosition(pinchCenter);
+                const correctedPos = getCorrectedLeftPos(controller);
+                snapshotPanel.setAbsolutePosition(correctedPos);
                 snapshotPanel.lookAt(xrHelper.baseExperience.camera.globalPosition, Math.PI);
+                setStatus("左手搬运中...");
             } else {
                 isGrabbingLeft = false;
-                snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
             }
         } 
+        
+        // --- 右手：射线绘画 + 截图双模逻辑 ---
         else if (side === "right") {
-            // 右手逻辑 A：截图触发
-            if (isPinching && !wasPinchingRight) {
-                if (performance.now() - lastPinchTime > COOLDOWN) {
-                    lastPinchTime = performance.now();
-                    takeSnapshot(); 
+            if (isTriggered) {
+                // 1. 发射射线检测
+                const ray = controller.getWorldPointerRay();
+                const pick = scene.pickWithRay(ray);
+                
+                if (pick.hit && pick.pickedMesh === snapshotPanel) {
+                    // 如果射中了面板：进入绘画模式
+                    const uv = pick.getTextureCoordinates();
+                    drawByRay(uv, !isDrawingRight);
+                    isDrawingRight = true;
+                    setStatus("正在绘画...");
+                } else {
+                    // 如果捏合了但没射中：不触发绘画
+                    isDrawingRight = false;
                 }
-            }
-            wasPinchingRight = isPinching;
-
-            // 右手逻辑 B：物理接触绘图
-            if (snapshotPanel.isEnabled()) {
-                handleDrawing(index); 
+            } else {
+                // 2. 松开捏合时的逻辑判定
+                if (isDrawingRight) {
+                    // 刚才在画画，现在停笔
+                    isDrawingRight = false;
+                    lastDrawUV = null;
+                    setStatus("停止绘画");
+                } else if (performance.now() - lastSnapshotTime > SNAPSHOT_COOLDOWN) {
+                    // 刚才没在画画（指着空气捏合的），视为截图指令
+                    lastSnapshotTime = performance.now();
+                    takeSnapshot();
+                }
             }
         }
     });
 }
 
 async function initXR() {
-    xrHelper = await scene.createDefaultXRExperienceAsync({
-        uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
-    });
-    xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", {
-        xrInput: xrHelper.input
-    });
+    try {
+        xrHelper = await scene.createDefaultXRExperienceAsync({
+            uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
+        });
+        // 开启手势支持
+        xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", {
+            xrInput: xrHelper.input
+        });
+        setStatus("XR 已就绪");
+    } catch (e) { setStatus("XR 启动失败"); }
 }
 
 async function bootstrap() {
@@ -185,13 +165,13 @@ async function bootstrap() {
     scene = new BABYLON.Scene(engine);
     new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
 
+    // 面板设置
     snapshotPanel = BABYLON.MeshBuilder.CreatePlane("sPanel", { 
         width: PANEL_WORLD_WIDTH, height: PANEL_WORLD_HEIGHT, sideOrientation: BABYLON.Mesh.DOUBLESIDE 
     }, scene);
     
     snapshotTexture = new BABYLON.DynamicTexture("sTex", { width: PANEL_TEX_SIZE, height: PANEL_TEX_SIZE }, scene);
     snapshotTextureCtx = snapshotTexture.getContext();
-    
     snapshotMaterial = new BABYLON.StandardMaterial("sMat", scene);
     snapshotMaterial.diffuseTexture = snapshotTexture;
     snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
@@ -199,13 +179,15 @@ async function bootstrap() {
     snapshotPanel.material = snapshotMaterial;
     snapshotPanel.setEnabled(false);
 
+    // 启动视频流
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ 
             video: { facingMode: "environment", width: 1280, height: 720 } 
         });
         video.srcObject = stream;
         await video.play();
-    } catch (e) { setStatus("摄像头未连接"); }
+        setStatus("摄像头已连接");
+    } catch (e) { setStatus("无法访问摄像头"); }
 
     await initXR();
     engine.runRenderLoop(() => { 
