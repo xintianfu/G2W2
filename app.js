@@ -10,14 +10,22 @@ snapshotPreview.height = 512;
 let engine, scene, xrHelper;
 let snapshotPanel, snapshotMaterial, snapshotTexture, snapshotTextureCtx;
 
+// 交互状态
 let isDrawing = false;
+let isGrabbing = false;
+let currentGrabHand = null; // "left" | "right"
 let lastDrawUV = null;
 
 let currentCameraStream = null;
 let leftHandInput = null;
 let rightHandInput = null;
+
+// 阈值配置
 const pinchThreshold = 0.04;
 const pinchCooldownMs = 1000;
+const grabDistanceThreshold = 0.25; // 手部离面板多近可以抓取
+const fistThreshold = 0.08;        // 判定为握拳的平均距离阈值
+
 let lastPinchTime = 0;
 let wasPinchingRight = false;
 
@@ -49,7 +57,7 @@ function getCameraPoseVectors() {
     const forward = cam.getForwardRay(1).direction.normalize();
     const up = new BABYLON.Vector3(0, 1, 0);
     const right = BABYLON.Vector3.Cross(forward, up).normalize();
-    return { camPos, forward, right };
+    return { cam, camPos, forward, up, right };
 }
 
 function placePanelAtCurrentView() {
@@ -62,12 +70,10 @@ function placePanelAtCurrentView() {
     snapshotPanel.setEnabled(true);
 }
 
-// ---------- 截图逻辑 (去掉了反向的文字) ----------
+// ---------- 截图逻辑 ----------
 function updateSnapshotFromCurrentVideoFrame() {
     if (!video.videoWidth || !video.videoHeight) return;
     const ctx = snapshotTextureCtx;
-    
-    // 重置并清空
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
 
@@ -88,17 +94,13 @@ function updateSnapshotFromCurrentVideoFrame() {
     }
 
     ctx.save();
-    // 矩阵变换实现左右镜像修正
     ctx.translate(PANEL_TEX_WIDTH / 2, PANEL_TEX_HEIGHT / 2);
     ctx.scale(-1, 1); 
     ctx.translate(-PANEL_TEX_WIDTH / 2, -PANEL_TEX_HEIGHT / 2);
-    
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
     ctx.drawImage(video, offsetX, offsetY, drawWidth, drawHeight);
     ctx.restore();
-
-    // --- 已移除文字绘制代码 ---
 
     snapshotTexture.update();
     updatePreviewFromTexture();
@@ -110,12 +112,7 @@ function setupPointerLogic() {
     scene.onPointerObservable.add((pointerInfo) => {
         const type = pointerInfo.type;
         const pickInfo = pointerInfo.pickInfo;
-        
-        // 关键：检查拾取点是否在面板上，且拾取距离非常近（近距离触碰）或通过射线点击
         const isHit = pickInfo?.hit && pickInfo.pickedMesh === snapshotPanel;
-        
-        // 如果你想要更严格的手指触碰判定，可以检查 pickInfo.distance
-        // 但通常 Babylon 的 PointerDown 在近距离触碰控制器/手指时会自动触发
         const uv = isHit ? pickInfo.getTextureCoordinates() : null;
 
         if (type === BABYLON.PointerEventTypes.POINTERDOWN && uv) {
@@ -124,11 +121,9 @@ function setupPointerLogic() {
             drawAtUV(uv, true);
         } else if (type === BABYLON.PointerEventTypes.POINTERMOVE && isDrawing) {
             if (uv) {
-                // 如果是移动过程中，且 UV 依然有效，则连线
                 drawAtUV(uv, false);
                 lastDrawUV = uv;
             } else {
-                // 如果手指离开了面板表面，断开线条
                 lastDrawUV = null;
             }
         } else if (type === BABYLON.PointerEventTypes.POINTERUP) {
@@ -141,10 +136,7 @@ function setupPointerLogic() {
 function drawAtUV(uv, isFirstPoint) {
     const ctx = snapshotTextureCtx;
     ctx.setTransform(1, 0, 0, 1, 0, 0); 
-    
-    // 配合底图修正镜像，X坐标取反 (1 - uv.x)
     const x = (1 - uv.x) * PANEL_TEX_WIDTH;
-    // 反转 Y
     const y = (1 - uv.y) * PANEL_TEX_HEIGHT; 
     
     ctx.strokeStyle = "#ff3b30";
@@ -169,7 +161,106 @@ function drawAtUV(uv, isFirstPoint) {
     updatePreviewFromTexture();
 }
 
-// ---------- 摄像头与 XR (保持不变) ----------
+// ---------- 手势检测逻辑 ----------
+function getJointPos(hand, name) {
+    if (!hand?.inputSource?.hand) return null;
+    const joint = hand.inputSource.hand.get(name);
+    const frame = xrHelper?.baseExperience?.sessionManager?.currentFrame;
+    const ref = xrHelper?.baseExperience?.sessionManager?.referenceSpace;
+    if (!frame || !joint || !ref) return null;
+    const pose = frame.getJointPose(joint, ref);
+    return pose ? new BABYLON.Vector3(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z) : null;
+}
+
+// 检测握拳手势
+function detectFist(handInput) {
+    const wrist = getJointPos(handInput, "wrist");
+    const indexTip = getJointPos(handInput, "index-finger-tip");
+    const middleTip = getJointPos(handInput, "middle-finger-tip");
+    const ringTip = getJointPos(handInput, "ring-finger-tip");
+
+    if (!wrist || !indexTip || !middleTip || !ringTip) return false;
+
+    // 计算指尖到手腕的平均距离
+    const avgDist = (
+        BABYLON.Vector3.Distance(wrist, indexTip) +
+        BABYLON.Vector3.Distance(wrist, middleTip) +
+        BABYLON.Vector3.Distance(wrist, ringTip)
+    ) / 3;
+
+    return avgDist < fistThreshold;
+}
+
+// ---------- 核心循环 ----------
+function updateLoop() {
+    if (!xrHelper) return;
+
+    // 1. Pinch 截图逻辑 (右手)
+    const rightThumb = getJointPos(rightHandInput, "thumb-tip");
+    const rightIndex = getJointPos(rightHandInput, "index-finger-tip");
+    let isPinching = (rightThumb && rightIndex) ? BABYLON.Vector3.Distance(rightThumb, rightIndex) < pinchThreshold : false;
+
+    if (isPinching && !wasPinchingRight) {
+        if (nowMs() - lastPinchTime > pinchCooldownMs) {
+            lastPinchTime = nowMs();
+            updateSnapshotFromCurrentVideoFrame();
+        }
+    }
+    wasPinchingRight = isPinching;
+
+    // 2. 握拳抓取移动逻辑
+    handleGrabbing();
+}
+
+function handleGrabbing() {
+    const leftFist = detectFist(leftHandInput);
+    const rightFist = detectFist(rightHandInput);
+
+    if (isGrabbing) {
+        // 正在抓取中
+        const activeHand = currentGrabHand === "left" ? leftHandInput : rightHandInput;
+        const stillFist = currentGrabHand === "left" ? leftFist : rightFist;
+        const wristPos = getJointPos(activeHand, "wrist");
+
+        // 如果松开拳头或丢失追踪，停止抓取
+        if (!stillFist || !wristPos) {
+            isGrabbing = false;
+            currentGrabHand = null;
+            setStatus("Grab Released");
+            return;
+        }
+
+        // 面板跟随手腕移动
+        snapshotPanel.position.copyFrom(wristPos);
+        
+        // 让面板始终朝向相机
+        const data = getCameraPoseVectors();
+        if (data) snapshotPanel.lookAt(data.camPos);
+
+    } else {
+        // 检测起始抓取条件
+        if (leftFist) {
+            checkAndStartGrab(leftHandInput, "left");
+        } else if (rightFist) {
+            checkAndStartGrab(rightHandInput, "right");
+        }
+    }
+}
+
+function checkAndStartGrab(handInput, side) {
+    const wristPos = getJointPos(handInput, "wrist");
+    if (!wristPos || !snapshotPanel) return;
+
+    // 检查手部是否离面板足够近
+    const dist = BABYLON.Vector3.Distance(wristPos, snapshotPanel.position);
+    if (dist < grabDistanceThreshold) {
+        isGrabbing = true;
+        currentGrabHand = side;
+        setStatus(`Grabbing with ${side} hand`);
+    }
+}
+
+// ---------- 启动 ----------
 async function startCamera() {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -178,7 +269,6 @@ async function startCamera() {
         });
         video.srcObject = stream;
         await video.play();
-        setStatus("Camera OK");
     } catch (err) { setStatus("Camera Error"); }
 }
 
@@ -195,42 +285,17 @@ async function initXR() {
     });
 }
 
-function getJointPos(hand, name) {
-    if (!hand?.inputSource?.hand) return null;
-    const joint = hand.inputSource.hand.get(name);
-    const frame = xrHelper?.baseExperience?.sessionManager?.currentFrame;
-    const ref = xrHelper?.baseExperience?.sessionManager?.referenceSpace;
-    if (!frame || !joint || !ref) return null;
-    const pose = frame.getJointPose(joint, ref);
-    return pose ? new BABYLON.Vector3(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z) : null;
-}
-
-function updateLoop() {
-    if (!xrHelper) return;
-    const thumb = getJointPos(rightHandInput, "thumb-tip");
-    const index = getJointPos(rightHandInput, "index-finger-tip");
-    let isPinching = (thumb && index) ? BABYLON.Vector3.Distance(thumb, index) < pinchThreshold : false;
-
-    if (isPinching && !wasPinchingRight) {
-        if (nowMs() - lastPinchTime > pinchCooldownMs) {
-            lastPinchTime = nowMs();
-            updateSnapshotFromCurrentVideoFrame();
-        }
-    }
-    wasPinchingRight = isPinching;
-}
-
 async function bootstrap() {
     engine = new BABYLON.Engine(canvas, true);
     scene = new BABYLON.Scene(engine);
     scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);
     new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
-    const cam = new BABYLON.UniversalCamera("camera", new BABYLON.Vector3(0, 1.6, -2), scene);
-
+    
+    // 初始化面板
     snapshotPanel = BABYLON.MeshBuilder.CreatePlane("snapshotPanel", { width: PANEL_WORLD_WIDTH, height: PANEL_WORLD_HEIGHT, sideOrientation: BABYLON.Mesh.DOUBLESIDE }, scene);
     snapshotTexture = new BABYLON.DynamicTexture("sTex", { width: PANEL_TEX_WIDTH, height: PANEL_TEX_HEIGHT }, scene);
-    
     snapshotTextureCtx = snapshotTexture.getContext();
+    
     const mat = new BABYLON.StandardMaterial("sMat", scene);
     mat.diffuseTexture = snapshotTexture;
     mat.emissiveColor = new BABYLON.Color3(1, 1, 1);
