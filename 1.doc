@@ -106,7 +106,7 @@ function placePanelAtRightFront() {
 
   const targetPos = camPos
     .add(forward.scale(0.62))
-    .add(right.scale(0.28));
+    .add(left.scale(0.10));
 
   snapshotPanel.position.copyFrom(targetPos);
   snapshotPanel.lookAt(camPos);
@@ -609,19 +609,20 @@ function maybeTriggerSnapshotFromPinch() {
 
   const now = nowMs();
 
-  const leftPinching = detectPinch(leftHandInput);
+  //const leftPinching = detectPinch(leftHandInput);
   const rightPinching = detectPinch(rightHandInput);
 
-  const leftRising = leftPinching && !wasPinchingLeft;
+  //const leftRising = leftPinching && !wasPinchingLeft;
   const rightRising = rightPinching && !wasPinchingRight;
 
-  if ((leftRising || rightRising) && now - lastPinchTime > pinchCooldownMs) {
+  if (rightRising && now - lastPinchTime > pinchCooldownMs) {
+  // if ((leftRising || rightRising) && now - lastPinchTime > pinchCooldownMs) {
     lastPinchTime = now;
     updateSnapshotFromCurrentVideoFrame();
     setStatus("Snapshot updated by pinch");
   }
 
-  wasPinchingLeft = leftPinching;
+  //wasPinchingLeft = leftPinching;
   wasPinchingRight = rightPinching;
 }
 
