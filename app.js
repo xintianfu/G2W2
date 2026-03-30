@@ -12,7 +12,7 @@ let wasPinchingRight = false;
 let lastPinchTime = 0;
 
 // 统一判定阈值 (采用你右手验证成功的 4cm)
-const PINCH_THRESHOLD = 0.04; 
+const PINCH_THRESHOLD = 0.02; 
 const COOLDOWN = 1500;
 
 const PANEL_TEX_SIZE = 1024;
