@@ -19,16 +19,14 @@ let snapshotTextureCtx = null;
 
 // interaction state
 let isDrawing = false;
-let lastDrawPoint = null;
-let activeDrawingHand = null; // "left" | "right" | null
-
 let isGrabbing = false;
+let lastDrawUV = null;
 let currentGrabHand = null;
 
 // camera
 let currentCameraStream = null;
 
-// pinch state
+// pinch/input state
 let leftHandInput = null;
 let rightHandInput = null;
 let pinchThreshold = 0.04;
@@ -44,8 +42,6 @@ const PANEL_TEX_WIDTH = 1024;
 const PANEL_TEX_HEIGHT = 1024;
 const PANEL_WORLD_WIDTH = 0.42;
 const PANEL_WORLD_HEIGHT = 0.28;
-const PANEL_HALF_W = PANEL_WORLD_WIDTH / 2;
-const PANEL_HALF_H = PANEL_WORLD_HEIGHT / 2;
 
 // ---------- helpers ----------
 function setStatus(text) {
@@ -69,11 +65,7 @@ function updatePreviewFromTexture() {
 }
 
 function getReferenceCamera() {
-  if (
-    xrHelper &&
-    xrHelper.baseExperience &&
-    xrHelper.baseExperience.state === BABYLON.WebXRState.IN_XR
-  ) {
+  if (xrHelper && xrHelper.baseExperience && xrHelper.baseExperience.state === BABYLON.WebXRState.IN_XR) {
     return xrHelper.baseExperience.camera;
   }
   return scene.activeCamera;
@@ -83,10 +75,7 @@ function getCameraPoseVectors() {
   const cam = getReferenceCamera();
   if (!cam) return null;
 
-  const camPos = cam.globalPosition
-    ? cam.globalPosition.clone()
-    : cam.position.clone();
-
+  const camPos = cam.globalPosition ? cam.globalPosition.clone() : cam.position.clone();
   const forward = cam.getForwardRay(1).direction.normalize();
   const up = new BABYLON.Vector3(0, 1, 0);
   const right = BABYLON.Vector3.Cross(forward, up).normalize();
@@ -99,12 +88,8 @@ function placePanelAtRightFront() {
   if (!data || !snapshotPanel) return;
 
   const { camPos, forward, right } = data;
-  const left = right.scale(-1);
-
-  const targetPos = camPos
-    .add(forward.scale(0.62))
-    .add(left.scale(0.10)); // 视线中间偏左
-
+  // 放置在右前方一点
+  const targetPos = camPos.add(forward.scale(0.62)).add(right.scale(0.15));
   snapshotPanel.position.copyFrom(targetPos);
   snapshotPanel.lookAt(camPos);
   snapshotPanel.setEnabled(true);
@@ -115,7 +100,6 @@ function placePanelInFront() {
   if (!data || !snapshotPanel) return;
 
   const { camPos, forward } = data;
-
   const targetPos = camPos.add(forward.scale(0.55));
   snapshotPanel.position.copyFrom(targetPos);
   snapshotPanel.lookAt(camPos);
@@ -124,31 +108,16 @@ function placePanelInFront() {
 
 function drawPlaceholder() {
   const ctx = snapshotTextureCtx;
-
   ctx.fillStyle = "#ffcc00";
   ctx.fillRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
-
   ctx.fillStyle = "#000000";
   ctx.font = "bold 72px Arial";
-  ctx.fillText("SNAPSHOT", 120, 220);
-
+  ctx.fillText("READY", 120, 220);
   ctx.font = "40px Arial";
-  ctx.fillText("right pinch = snapshot", 120, 320);
-  ctx.fillText("touch panel = draw", 120, 390);
-  ctx.fillText("grab panel = move", 120, 460);
-
+  ctx.fillText("Pinch to Snapshot", 120, 320);
+  ctx.fillText("Touch Panel to Draw", 120, 390);
   snapshotTexture.update();
   updatePreviewFromTexture();
-}
-
-function clearInkByRebuildingSnapshot() {
-  updateSnapshotFromCurrentVideoFrame();
-}
-
-function resetDrawingState() {
-  isDrawing = false;
-  lastDrawPoint = null;
-  activeDrawingHand = null;
 }
 
 // ---------- scene ----------
@@ -156,28 +125,13 @@ function createScene() {
   scene = new BABYLON.Scene(engine);
   scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);
 
-  const camera = new BABYLON.UniversalCamera(
-    "desktopCam",
-    new BABYLON.Vector3(0, 1.6, -2),
-    scene
-  );
+  const camera = new BABYLON.UniversalCamera("desktopCam", new BABYLON.Vector3(0, 1.6, -2), scene);
   camera.attachControl(canvas, true);
-  camera.speed = 0.08;
 
-  const light = new BABYLON.HemisphericLight(
-    "light",
-    new BABYLON.Vector3(0, 1, 0),
-    scene
-  );
+  const light = new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
   light.intensity = 1.0;
 
-  const ground = BABYLON.MeshBuilder.CreateGround(
-    "ground",
-    { width: 8, height: 8 },
-    scene
-  );
-  ground.position.y = 0;
-
+  const ground = BABYLON.MeshBuilder.CreateGround("ground", { width: 8, height: 8 }, scene);
   const groundMat = new BABYLON.StandardMaterial("groundMat", scene);
   groundMat.diffuseColor = new BABYLON.Color3(0.18, 0.18, 0.2);
   groundMat.alpha = 0.35;
@@ -188,26 +142,16 @@ function createScene() {
 }
 
 function createSnapshotPanel() {
-  snapshotPanel = BABYLON.MeshBuilder.CreatePlane(
-    "snapshotPanel",
-    {
-      width: PANEL_WORLD_WIDTH,
-      height: PANEL_WORLD_HEIGHT,
-      sideOrientation: BABYLON.Mesh.DOUBLESIDE,
-    },
-    scene
-  );
+  snapshotPanel = BABYLON.MeshBuilder.CreatePlane("snapshotPanel", {
+    width: PANEL_WORLD_WIDTH,
+    height: PANEL_WORLD_HEIGHT,
+    sideOrientation: BABYLON.Mesh.DOUBLESIDE,
+  }, scene);
 
-  snapshotPanel.isPickable = false;
+  snapshotPanel.isPickable = true;
   snapshotPanel.setEnabled(false);
 
-  snapshotTexture = new BABYLON.DynamicTexture(
-    "snapshotTexture",
-    { width: PANEL_TEX_WIDTH, height: PANEL_TEX_HEIGHT },
-    scene,
-    true
-  );
-  snapshotTexture.hasAlpha = false;
+  snapshotTexture = new BABYLON.DynamicTexture("snapshotTexture", { width: PANEL_TEX_WIDTH, height: PANEL_TEX_HEIGHT }, scene, true);
   snapshotTextureCtx = snapshotTexture.getContext();
 
   snapshotMaterial = new BABYLON.StandardMaterial("snapshotMat", scene);
@@ -220,86 +164,23 @@ function createSnapshotPanel() {
 }
 
 // ---------- camera ----------
-async function stopCurrentCameraStream() {
-  if (currentCameraStream) {
-    currentCameraStream.getTracks().forEach((track) => track.stop());
-    currentCameraStream = null;
-  }
-  video.srcObject = null;
-}
-
-async function requestEnvironmentCameraExact() {
-  return navigator.mediaDevices.getUserMedia({
-    video: {
-      facingMode: { exact: "environment" },
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
-    },
-    audio: false,
-  });
-}
-
-async function requestEnvironmentCameraPreferred() {
-  return navigator.mediaDevices.getUserMedia({
-    video: {
-      facingMode: "environment",
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
-    },
-    audio: false,
-  });
-}
-
-async function requestAnyCamera() {
-  return navigator.mediaDevices.getUserMedia({
-    video: {
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
-    },
-    audio: false,
-  });
-}
-
 async function startCamera() {
   try {
-    await stopCurrentCameraStream();
-    setStatus("Requesting camera...");
-
-    let stream = null;
-
-    try {
-      stream = await requestEnvironmentCameraExact();
-      console.log("Exact environment camera success");
-    } catch (err1) {
-      console.warn("Exact environment failed:", err1);
-      try {
-        stream = await requestEnvironmentCameraPreferred();
-        console.log("Preferred environment camera success");
-      } catch (err2) {
-        console.warn("Preferred environment failed:", err2);
-        stream = await requestAnyCamera();
-        console.log("Fallback camera success");
-      }
-    }
-
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false,
+    });
     currentCameraStream = stream;
     video.srcObject = stream;
     await video.play();
-
     setStatus("Camera ready");
   } catch (err) {
-    console.error(err);
     setStatus(`Camera failed: ${err.message}`);
   }
 }
 
 function updateSnapshotFromCurrentVideoFrame() {
-  if (!video.videoWidth || !video.videoHeight) {
-    setStatus("No camera frame available");
-    return;
-  }
-
-  resetDrawingState();
+  if (!video.videoWidth) return;
 
   const ctx = snapshotTextureCtx;
   ctx.clearRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
@@ -307,11 +188,7 @@ function updateSnapshotFromCurrentVideoFrame() {
   const videoAspect = video.videoWidth / video.videoHeight;
   const texAspect = PANEL_TEX_WIDTH / PANEL_TEX_HEIGHT;
 
-  let drawWidth;
-  let drawHeight;
-  let offsetX;
-  let offsetY;
-
+  let drawWidth, drawHeight, offsetX, offsetY;
   if (videoAspect > texAspect) {
     drawHeight = PANEL_TEX_HEIGHT;
     drawWidth = drawHeight * videoAspect;
@@ -328,379 +205,177 @@ function updateSnapshotFromCurrentVideoFrame() {
   ctx.fillRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
   ctx.drawImage(video, offsetX, offsetY, drawWidth, drawHeight);
 
-  ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
-  ctx.fillRect(24, 24, 420, 96);
+  // Overlay info
+  ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
+  ctx.fillRect(20, 20, 300, 60);
   ctx.fillStyle = "white";
-  ctx.font = "bold 36px Arial";
-  ctx.fillText("Snapshot", 46, 72);
   ctx.font = "24px Arial";
-  ctx.fillText(new Date().toLocaleTimeString(), 46, 102);
+  ctx.fillText("LIVE SNAPSHOT", 40, 58);
 
   snapshotTexture.update();
   updatePreviewFromTexture();
   placePanelAtRightFront();
-
-  setStatus("Snapshot updated");
+  setStatus("Snapshot Updated");
 }
 
 // ---------- XR ----------
 async function initXR() {
   xrHelper = await scene.createDefaultXRExperienceAsync({
-    uiOptions: {
-      sessionMode: "immersive-ar",
-      referenceSpaceType: "local-floor",
-    },
+    uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" },
     optionalFeatures: true,
-    inputOptions: {
-      doNotLoadControllerMeshes: true,
-    },
+    inputOptions: { doNotLoadControllerMeshes: true },
   });
 
-  // 关掉默认射线显示
-  if (xrHelper.pointerSelection) {
-    xrHelper.pointerSelection.displayLaserPointer = false;
-    xrHelper.pointerSelection.displaySelectionMesh = false;
-  }
-
-  tryEnableHandTracking();
-
-  xrHelper.baseExperience.onStateChangedObservable.add((state) => {
-    if (state === BABYLON.WebXRState.IN_XR) {
-      setStatus("Entered AR");
-      placePanelAtRightFront();
-    } else if (state === BABYLON.WebXRState.ENTERING_XR) {
-      setStatus("Entering AR...");
-    } else if (state === BABYLON.WebXRState.EXITING_XR) {
-      setStatus("Exiting AR...");
-    } else if (state === BABYLON.WebXRState.NOT_IN_XR) {
-      setStatus("Not in XR");
-    }
-  });
-}
-
-function tryEnableHandTracking() {
   try {
-    xrHelper.baseExperience.featuresManager.enableFeature(
-      BABYLON.WebXRFeatureName.HAND_TRACKING,
-      "latest",
-      {
-        xrInput: xrHelper.input,
-      }
-    );
-
+    xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", { xrInput: xrHelper.input });
     xrHelper.input.onControllerAddedObservable.add((inputSource) => {
       if (inputSource.inputSource && inputSource.inputSource.hand) {
-        if (inputSource.inputSource.handedness === "left") {
-          leftHandInput = inputSource;
-          console.log("Left hand detected");
-        } else if (inputSource.inputSource.handedness === "right") {
-          rightHandInput = inputSource;
-          console.log("Right hand detected");
-        }
+        if (inputSource.inputSource.handedness === "left") leftHandInput = inputSource;
+        else if (inputSource.inputSource.handedness === "right") rightHandInput = inputSource;
       }
     });
-
-    xrHelper.input.onControllerRemovedObservable.add((inputSource) => {
-      if (leftHandInput === inputSource) leftHandInput = null;
-      if (rightHandInput === inputSource) rightHandInput = null;
-    });
-  } catch (err) {
-    console.warn("Hand tracking not enabled:", err);
-  }
+  } catch (e) { console.warn("Hand tracking failed"); }
 }
 
-// ---------- drawing ----------
+// ---------- drawing logic (Modified) ----------
+function getPanelUVFromPointer(pointerInfo) {
+  if (!pointerInfo.pickInfo || !pointerInfo.pickInfo.hit) return null;
+  if (pointerInfo.pickInfo.pickedMesh !== snapshotPanel) return null;
+  return pointerInfo.pickInfo.getTextureCoordinates();
+}
+
 function uvToCanvasPoint(uv) {
   if (!uv) return null;
-  return {
-    x: uv.x * PANEL_TEX_WIDTH,
-    y: (1 - uv.y) * PANEL_TEX_HEIGHT,
-  };
+  return { x: uv.x * PANEL_TEX_WIDTH, y: (1 - uv.y) * PANEL_TEX_HEIGHT };
 }
 
-function drawDotAtUV(uv) {
-  const pt = uvToCanvasPoint(uv);
-  if (!pt) return;
-
-  const ctx = snapshotTextureCtx;
-  ctx.fillStyle = "#ff3b30";
-  ctx.beginPath();
-  ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2);
-  ctx.fill();
-
-  snapshotTexture.update();
-  updatePreviewFromTexture();
-}
-
-function drawLinePoints(p1, p2) {
-  if (!p1 || !p2) return;
-
+function drawLineUV(uv1, uv2) {
+  const p1 = uvToCanvasPoint(uv1);
+  const p2 = uvToCanvasPoint(uv2);
   const ctx = snapshotTextureCtx;
   ctx.strokeStyle = "#ff3b30";
-  ctx.lineWidth = 8;
+  ctx.lineWidth = 10;
   ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-
   ctx.beginPath();
   ctx.moveTo(p1.x, p1.y);
   ctx.lineTo(p2.x, p2.y);
   ctx.stroke();
-
   snapshotTexture.update();
   updatePreviewFromTexture();
 }
 
-// ---------- hand joints ----------
-function getXRFrame() {
-  if (!xrHelper || !xrHelper.baseExperience || !xrHelper.baseExperience.sessionManager) {
-    return null;
-  }
-  return xrHelper.baseExperience.sessionManager.currentFrame || null;
-}
+function setupPointerLogic() {
+  scene.onPointerObservable.add((pointerInfo) => {
+    const type = pointerInfo.type;
+    const uv = getPanelUVFromPointer(pointerInfo);
 
-function getXRReferenceSpace() {
-  if (!xrHelper || !xrHelper.baseExperience || !xrHelper.baseExperience.sessionManager) {
-    return null;
-  }
-  return (
-    xrHelper.baseExperience.sessionManager.referenceSpace ||
-    xrHelper.baseExperience.sessionManager.baseReferenceSpace ||
-    null
-  );
-}
-
-function getJointPosition(handInput, jointName) {
-  try {
-    if (!handInput || !handInput.inputSource || !handInput.inputSource.hand) {
-      return null;
+    // 直接检测按下，不需要先选中模式
+    if (type === BABYLON.PointerEventTypes.POINTERDOWN) {
+      if (uv) {
+        isDrawing = true;
+        lastDrawUV = uv;
+        // 画个点
+        const p = uvToCanvasPoint(uv);
+        snapshotTextureCtx.fillStyle = "#ff3b30";
+        snapshotTextureCtx.beginPath();
+        snapshotTextureCtx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+        snapshotTextureCtx.fill();
+        snapshotTexture.update();
+      }
+      return;
     }
 
-    const jointSpace = handInput.inputSource.hand.get(jointName);
-    if (!jointSpace) return null;
+    if (type === BABYLON.PointerEventTypes.POINTERMOVE) {
+      if (!isDrawing || !uv) {
+        lastDrawUV = null;
+        return;
+      }
+      if (lastDrawUV) drawLineUV(lastDrawUV, uv);
+      lastDrawUV = uv;
+    }
 
-    const xrFrame = getXRFrame();
-    const referenceSpace = getXRReferenceSpace();
+    if (type === BABYLON.PointerEventTypes.POINTERUP) {
+      isDrawing = false;
+      lastDrawUV = null;
+    }
+  });
+}
 
-    if (!xrFrame || !referenceSpace) return null;
-
-    const jointPose = xrFrame.getJointPose(jointSpace, referenceSpace);
-    if (!jointPose) return null;
-
-    const p = jointPose.transform.position;
-    return new BABYLON.Vector3(p.x, p.y, p.z);
-  } catch (err) {
-    return null;
-  }
+// ---------- Joint Tracking ----------
+function getJointPosition(handInput, jointName) {
+  if (!handInput || !handInput.inputSource.hand) return null;
+  const jointSpace = handInput.inputSource.hand.get(jointName);
+  const xrFrame = xrHelper.baseExperience.sessionManager.currentFrame;
+  const refSpace = xrHelper.baseExperience.sessionManager.referenceSpace;
+  if (!xrFrame || !jointSpace || !refSpace) return null;
+  const pose = xrFrame.getJointPose(jointSpace, refSpace);
+  return pose ? new BABYLON.Vector3(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z) : null;
 }
 
 function detectPinch(handInput) {
-  const thumbTip = getJointPosition(handInput, "thumb-tip");
-  const indexTip = getJointPosition(handInput, "index-finger-tip");
-
-  if (!thumbTip || !indexTip) return false;
-  return BABYLON.Vector3.Distance(thumbTip, indexTip) < pinchThreshold;
+  const thumb = getJointPosition(handInput, "thumb-tip");
+  const index = getJointPosition(handInput, "index-finger-tip");
+  return (thumb && index) ? BABYLON.Vector3.Distance(thumb, index) < pinchThreshold : false;
 }
 
 function detectFist(handInput) {
   const wrist = getJointPosition(handInput, "wrist");
-  const indexTip = getJointPosition(handInput, "index-finger-tip");
-  const middleTip = getJointPosition(handInput, "middle-finger-tip");
-  const ringTip = getJointPosition(handInput, "ring-finger-tip");
-  const pinkyTip = getJointPosition(handInput, "pinky-finger-tip");
-
-  if (!wrist || !indexTip || !middleTip || !ringTip || !pinkyTip) return false;
-
-  const avg =
-    (BABYLON.Vector3.Distance(wrist, indexTip) +
-      BABYLON.Vector3.Distance(wrist, middleTip) +
-      BABYLON.Vector3.Distance(wrist, ringTip) +
-      BABYLON.Vector3.Distance(wrist, pinkyTip)) /
-    4;
-
-  return avg < fistThreshold;
+  const index = getJointPosition(handInput, "index-finger-tip");
+  return (wrist && index) ? BABYLON.Vector3.Distance(wrist, index) < fistThreshold : false;
 }
 
-function isHandNearPanel(handInput) {
-  const wrist = getJointPosition(handInput, "wrist");
-  if (!wrist || !snapshotPanel) return false;
-  return BABYLON.Vector3.Distance(wrist, snapshotPanel.position) < 0.28;
-}
-
-function getFingerPanelUV(handInput) {
-  const finger = getJointPosition(handInput, "index-finger-tip");
-  if (!finger || !snapshotPanel || !snapshotPanel.isEnabled()) return null;
-
-  const inv = BABYLON.Matrix.Invert(snapshotPanel.computeWorldMatrix(true));
-  const local = BABYLON.Vector3.TransformCoordinates(finger, inv);
-
-  const inside =
-    local.x >= -PANEL_HALF_W &&
-    local.x <= PANEL_HALF_W &&
-    local.y >= -PANEL_HALF_H &&
-    local.y <= PANEL_HALF_H &&
-    Math.abs(local.z) < 0.03;
-
-  if (!inside) return null;
-
-  const u = (local.x + PANEL_HALF_W) / PANEL_WORLD_WIDTH;
-  const v = (local.y + PANEL_HALF_H) / PANEL_WORLD_HEIGHT;
-
-  return new BABYLON.Vector2(u, v);
-}
-
-function updateFingerDrawing() {
-  if (
-    !xrHelper ||
-    !xrHelper.baseExperience ||
-    xrHelper.baseExperience.state !== BABYLON.WebXRState.IN_XR
-  ) {
-    resetDrawingState();
-    return;
-  }
-
-  if (!snapshotPanel || !snapshotPanel.isEnabled()) {
-    resetDrawingState();
-    return;
-  }
-
-  // 正在抓 panel 时不画
-  if (isGrabbing) {
-    resetDrawingState();
-    return;
-  }
-
-  let drawingHand = null;
-  let uv = getFingerPanelUV(rightHandInput);
-
-  if (uv) {
-    drawingHand = "right";
-  } else {
-    uv = getFingerPanelUV(leftHandInput);
-    if (uv) drawingHand = "left";
-  }
-
-  // 没有手指碰到 snapshot
-  if (!uv) {
-    resetDrawingState();
-    return;
-  }
-
-  const pt = uvToCanvasPoint(uv);
-
-  // 换手时重置一笔
-  if (activeDrawingHand !== drawingHand) {
-    isDrawing = false;
-    lastDrawPoint = null;
-    activeDrawingHand = drawingHand;
-  }
-
-  if (!isDrawing) {
-    isDrawing = true;
-    lastDrawPoint = pt;
-    drawDotAtUV(uv);
-    return;
-  }
-
-  drawLinePoints(lastDrawPoint, pt);
-  lastDrawPoint = pt;
-}
-
-// ---------- XR interactions ----------
+// ---------- loop updates ----------
 function maybeTriggerSnapshotFromPinch() {
-  if (
-    !xrHelper ||
-    !xrHelper.baseExperience ||
-    xrHelper.baseExperience.state !== BABYLON.WebXRState.IN_XR
-  ) {
-    return;
-  }
-
-  if (isGrabbing) return;
-
-  const now = nowMs();
-  const rightPinching = detectPinch(rightHandInput);
-  const rightRising = rightPinching && !wasPinchingRight;
-
-  if (rightRising && now - lastPinchTime > pinchCooldownMs) {
-    lastPinchTime = now;
+  if (!xrHelper || xrHelper.baseExperience.state !== BABYLON.WebXRState.IN_XR) return;
+  const isPinching = detectPinch(rightHandInput);
+  if (isPinching && !wasPinchingRight && (nowMs() - lastPinchTime > pinchCooldownMs)) {
+    lastPinchTime = nowMs();
     updateSnapshotFromCurrentVideoFrame();
-    setStatus("Snapshot updated by right-hand pinch");
   }
-
-  wasPinchingRight = rightPinching;
+  wasPinchingRight = isPinching;
 }
 
 function updateGrabMove() {
-  if (
-    !xrHelper ||
-    !xrHelper.baseExperience ||
-    xrHelper.baseExperience.state !== BABYLON.WebXRState.IN_XR
-  ) {
-    return;
-  }
-
+  if (isDrawing) return; // 绘画时禁止移动面板
   const leftFist = detectFist(leftHandInput);
   const rightFist = detectFist(rightHandInput);
 
   if (isGrabbing) {
-    const activeHand = currentGrabHand === "left" ? leftHandInput : rightHandInput;
+    const hand = currentGrabHand === "left" ? leftHandInput : rightHandInput;
     const stillFist = currentGrabHand === "left" ? leftFist : rightFist;
-    const wrist = getJointPosition(activeHand, "wrist");
-
+    const wrist = getJointPosition(hand, "wrist");
     if (!stillFist || !wrist) {
       isGrabbing = false;
       currentGrabHand = null;
       return;
     }
-
-    resetDrawingState();
-
     snapshotPanel.position.copyFrom(wrist);
     const data = getCameraPoseVectors();
     if (data) snapshotPanel.lookAt(data.camPos);
-    return;
-  }
-
-  if (leftFist && isHandNearPanel(leftHandInput)) {
-    isGrabbing = true;
-    currentGrabHand = "left";
-    resetDrawingState();
-    placePanelInFront();
-    return;
-  }
-
-  if (rightFist && isHandNearPanel(rightHandInput)) {
-    isGrabbing = true;
-    currentGrabHand = "right";
-    resetDrawingState();
-    placePanelInFront();
+  } else {
+    if (leftFist && BABYLON.Vector3.Distance(getJointPosition(leftHandInput, "wrist"), snapshotPanel.position) < 0.25) {
+      isGrabbing = true;
+      currentGrabHand = "left";
+    } else if (rightFist && BABYLON.Vector3.Distance(getJointPosition(rightHandInput, "wrist"), snapshotPanel.position) < 0.25) {
+      isGrabbing = true;
+      currentGrabHand = "right";
+    }
   }
 }
 
-// ---------- bootstrap ----------
 async function bootstrap() {
-  engine = new BABYLON.Engine(canvas, true, {
-    preserveDrawingBuffer: true,
-    stencil: true,
-  });
-
+  engine = new BABYLON.Engine(canvas, true);
   createScene();
-
+  setupPointerLogic();
   await startCamera();
   await initXR();
 
   engine.runRenderLoop(() => {
     maybeTriggerSnapshotFromPinch();
     updateGrabMove();
-    updateFingerDrawing();
     scene.render();
   });
-
-  window.addEventListener("resize", () => {
-    engine.resize();
-  });
-
-  setStatus("Ready");
+  window.addEventListener("resize", () => engine.resize());
 }
 
 bootstrap();
