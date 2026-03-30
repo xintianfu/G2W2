@@ -12,17 +12,15 @@ let snapshotPanel, snapshotMaterial, snapshotTexture, snapshotTextureCtx;
 
 // 交互状态
 let isDrawing = false;
-let isGrabbing = false; // 左手搬运
+let isGrabbing = false; 
 let lastDrawUV = null;
 
-let currentCameraStream = null;
 let leftHandInput = null;
 let rightHandInput = null;
 
-// 阈值
 const pinchThreshold = 0.04;
 const pinchCooldownMs = 1200;
-const grabDistanceThreshold = 0.35; // 稍微调大一点，方便抓取
+const grabDistanceThreshold = 0.4; 
 
 let lastPinchTime = 0;
 let wasPinchingRight = false;
@@ -46,7 +44,6 @@ function updatePreviewFromTexture() {
     previewCtx.drawImage(snapshotTexture.getContext().canvas, 0, 0, 512, 512);
 }
 
-// 保存截图
 function saveSnapshotToLocal() {
     try {
         const canvasToSave = snapshotTexture.getContext().canvas;
@@ -62,7 +59,7 @@ function saveSnapshotToLocal() {
 }
 
 function getCameraPoseVectors() {
-    let cam = (xrHelper?.baseExperience?.state === BABYLON.WebXRState.IN_XR) 
+    const cam = (xrHelper?.baseExperience?.state === BABYLON.WebXRState.IN_XR) 
         ? xrHelper.baseExperience.camera 
         : scene.activeCamera;
     if (!cam) return null;
@@ -76,7 +73,7 @@ function placePanelAtCurrentView() {
     if (!data || !snapshotPanel) return;
     const targetPos = data.camPos.add(data.forward.scale(0.6));
     snapshotPanel.position.copyFrom(targetPos);
-    snapshotPanel.lookAt(data.camPos);
+    snapshotPanel.lookAt(data.camPos, Math.PI); // 初始面向修正
     snapshotPanel.setEnabled(true);
 }
 
@@ -116,15 +113,20 @@ function updateSnapshotFromCurrentVideoFrame() {
     saveSnapshotToLocal();
 }
 
-// ---------- 画笔逻辑 (修正：仅允许右手画画) ----------
+// ---------- 画笔逻辑 (修正：完全禁用左手画画) ----------
 function setupPointerLogic() {
     scene.onPointerObservable.add((pointerInfo) => {
-        // 关键修复：检查触发事件的输入源
-        // 在 WebXR 中，可以通过 pointerId 或 input source 来识别
-        const inputSource = xrHelper?.pointerSelection?.getPointerContext(pointerInfo.event.pointerId)?.inputSource;
+        // 1. 获取输入源 ID
+        const pointerId = pointerInfo.event.pointerId;
         
-        // 如果能识别到输入源，且它是左手，则直接拦截不许画画
-        if (inputSource && inputSource.handedness === "left") return;
+        // 2. 如果在 XR 中，根据 pointerId 找到对应的手
+        if (xrHelper && xrHelper.baseExperience.state === BABYLON.WebXRState.IN_XR) {
+            const inputSource = xrHelper.pointerSelection.getPointerContext(pointerId)?.inputSource;
+            // 重点修复：如果是左手触发的 Pointer 事件，直接无视，不许进入绘画流程
+            if (inputSource && inputSource.handedness === "left") {
+                return; 
+            }
+        }
 
         const type = pointerInfo.type;
         const pickInfo = pointerInfo.pickInfo;
@@ -187,24 +189,29 @@ function getPinchInfo(hand) {
 
 // ---------- 核心循环 ----------
 function updateLoop() {
-    if (!xrHelper) return;
+    if (!xrHelper || xrHelper.baseExperience.state !== BABYLON.WebXRState.IN_XR) return;
 
-    // 1. 左手搬运 (优先级最高)
+    // 1. 左手抓取移动 (修正反向移动)
     const leftPinch = getPinchInfo(leftHandInput);
     if (isGrabbing) {
         if (!leftPinch.isPinching) {
             isGrabbing = false;
-            setStatus("Panel Static");
+            setStatus("Static");
         } else {
-            snapshotPanel.position.copyFrom(leftPinch.pos);
+            // 重点修复：直接设置绝对坐标，确保 1:1 跟随手部移动，不产生镜像反向
+            snapshotPanel.setAbsolutePosition(leftPinch.pos);
+            
             const camData = getCameraPoseVectors();
-            if (camData) snapshotPanel.lookAt(camData.camPos);
+            if (camData) {
+                // 让面板面向用户，Math.PI 修正可能存在的 180 度翻转
+                snapshotPanel.lookAt(camData.camPos, Math.PI); 
+            }
         }
-    } else if (leftPinch.isPinching && snapshotPanel.isEnabled()) {
+    } else if (leftPinch.isPinching) {
         const dist = BABYLON.Vector3.Distance(leftPinch.pos, snapshotPanel.position);
         if (dist < grabDistanceThreshold) {
             isGrabbing = true;
-            setStatus("Grabbing...");
+            setStatus("Moving Panel...");
         }
     }
 
@@ -228,21 +235,24 @@ async function startCamera() {
         });
         video.srcObject = stream;
         await video.play();
-    } catch (e) { setStatus("Camera error"); }
+    } catch (e) { setStatus("Camera Error"); }
 }
 
 async function initXR() {
-    xrHelper = await scene.createDefaultXRExperienceAsync({
-        uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
-    });
-    xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", { xrInput: xrHelper.input });
-    
-    xrHelper.input.onControllerAddedObservable.add((input) => {
-        if (input.inputSource.hand) {
-            if (input.inputSource.handedness === "left") leftHandInput = input;
-            else rightHandInput = input;
-        }
-    });
+    try {
+        xrHelper = await scene.createDefaultXRExperienceAsync({
+            uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
+        });
+        xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", { xrInput: xrHelper.input });
+        
+        xrHelper.input.onControllerAddedObservable.add((input) => {
+            if (input.inputSource.hand) {
+                const side = input.inputSource.handedness;
+                if (side === "left") leftHandInput = input;
+                else if (side === "right") rightHandInput = input;
+            }
+        });
+    } catch (e) { setStatus("XR Error"); }
 }
 
 async function bootstrap() {
@@ -263,7 +273,7 @@ async function bootstrap() {
     snapshotPanel.setEnabled(false);
 
     setupPointerLogic();
-    startCamera();
+    await startCamera();
     await initXR();
 
     engine.runRenderLoop(() => {
