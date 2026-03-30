@@ -62,12 +62,12 @@ function placePanelAtCurrentView() {
     snapshotPanel.setEnabled(true);
 }
 
-// ---------- 核心修复：截图逻辑 (解决垂直镜像和水平镜像) ----------
+// ---------- 截图逻辑 (去掉了反向的文字) ----------
 function updateSnapshotFromCurrentVideoFrame() {
     if (!video.videoWidth || !video.videoHeight) return;
     const ctx = snapshotTextureCtx;
     
-    // 1. 重置变换矩阵并清空画布
+    // 重置并清空
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
 
@@ -87,38 +87,25 @@ function updateSnapshotFromCurrentVideoFrame() {
         offsetY = (PANEL_TEX_HEIGHT - drawHeight) / 2;
     }
 
-    // --- 修复镜像核心逻辑 ---
-    // 摄像头的默认画面在 Canvas 里是左右反的，且 V 轴坐标也可能反。
-    // 我们在这里通过矩阵操作把它调正。
     ctx.save();
-    
-    // 核心组合变换：
-    // 1. 移动原点到画布中心
+    // 矩阵变换实现左右镜像修正
     ctx.translate(PANEL_TEX_WIDTH / 2, PANEL_TEX_HEIGHT / 2);
-    // 2. 左右对称翻转 (-1, 1) 实现镜像修正
-    // 如果你发现左右还是反，把这个改为 (1, 1)
-    // 如果你发现上下反了，把这个改为 (-1, -1)
     ctx.scale(-1, 1); 
-    // 3. 移回左上角
     ctx.translate(-PANEL_TEX_WIDTH / 2, -PANEL_TEX_HEIGHT / 2);
     
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
     ctx.drawImage(video, offsetX, offsetY, drawWidth, drawHeight);
-    
     ctx.restore();
-    // -----------------------
 
-    ctx.fillStyle = "white";
-    ctx.font = "bold 28px Arial";
-    ctx.fillText("CORRECTED SHOT: " + new Date().toLocaleTimeString(), 40, 60);
+    // --- 已移除文字绘制代码 ---
 
     snapshotTexture.update();
     updatePreviewFromTexture();
     placePanelAtCurrentView();
 }
 
-// ---------- 画笔逻辑 (同步修正后的坐标) ----------
+// ---------- 画笔逻辑 ----------
 function setupPointerLogic() {
     scene.onPointerObservable.add((pointerInfo) => {
         const type = pointerInfo.type;
@@ -145,15 +132,11 @@ function setupPointerLogic() {
 
 function drawAtUV(uv, isFirstPoint) {
     const ctx = snapshotTextureCtx;
-    // 绘图时重置变换矩阵，确保画笔不受截图矩阵影响
     ctx.setTransform(1, 0, 0, 1, 0, 0); 
     
-    // 关键点：由于底图在 Canvas 里反着画了修正镜像，
-    // 这里计算画笔坐标时也要同步修正 X 轴。
-    // 使用 (1 - uv.x)
+    // 配合底图修正镜像，X坐标取反 (1 - uv.x)
     const x = (1 - uv.x) * PANEL_TEX_WIDTH;
-    
-    // Babylon 的 UV 原点在左下，Canvas 绘图原点在左上，需要反转 Y。
+    // 反转 Y
     const y = (1 - uv.y) * PANEL_TEX_HEIGHT; 
     
     ctx.strokeStyle = "#ff3b30";
@@ -167,7 +150,6 @@ function drawAtUV(uv, isFirstPoint) {
         ctx.fillStyle = "#ff3b30";
         ctx.fill();
     } else {
-        // 连线坐标计算也必须一致
         const prevX = (1 - lastDrawUV.x) * PANEL_TEX_WIDTH;
         const prevY = (1 - lastDrawUV.y) * PANEL_TEX_HEIGHT;
         ctx.beginPath();
@@ -239,8 +221,6 @@ async function bootstrap() {
 
     snapshotPanel = BABYLON.MeshBuilder.CreatePlane("snapshotPanel", { width: PANEL_WORLD_WIDTH, height: PANEL_WORLD_HEIGHT, sideOrientation: BABYLON.Mesh.DOUBLESIDE }, scene);
     snapshotTexture = new BABYLON.DynamicTexture("sTex", { width: PANEL_TEX_WIDTH, height: PANEL_TEX_HEIGHT }, scene);
-    
-    // 这里依然不使用 vScale = -1，防止 Quest 卡死消失。
     
     snapshotTextureCtx = snapshotTexture.getContext();
     const mat = new BABYLON.StandardMaterial("sMat", scene);
