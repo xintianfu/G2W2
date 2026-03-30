@@ -32,11 +32,18 @@ let currentCameraStream = null;
 // pinch state
 let leftHandInput = null;
 let rightHandInput = null;
-let pinchThreshold = 0.04;
+
+// 更严格的 pinch 判定
+let pinchThreshold = 0.025;        // 触发 pinch：2.5cm
+let pinchReleaseThreshold = 0.04;  // 必须先张开到 4cm 以上才允许下一次 pinch
 let pinchCooldownMs = 1200;
 let lastPinchTime = 0;
-let wasPinchingLeft = false;
-let wasPinchingRight = false;
+
+// armed 机制：必须先 release，再 pinch
+let leftPinchArmed = false;
+let rightPinchArmed = false;
+let leftPinchState = false;
+let rightPinchState = false;
 
 // fist / grab state
 let fistThreshold = 0.09;
@@ -104,9 +111,14 @@ function placePanelAtLeftFollow() {
   const { camPos, forward, right } = data;
   const left = right.scale(-1);
 
+  const forwardOffset = 0.58;
+  const leftOffset = 0.36;      // 原来 0.26，现在更靠左
+  const verticalOffset = -0.02; // 稍微低一点，可自行调成 0
+
   const targetPos = camPos
-    .add(forward.scale(0.58))
-    .add(left.scale(0.26));
+    .add(forward.scale(forwardOffset))
+    .add(left.scale(leftOffset))
+    .add(new BABYLON.Vector3(0, verticalOffset, 0));
 
   snapshotPanel.position.copyFrom(targetPos);
   snapshotPanel.lookAt(camPos);
@@ -357,6 +369,12 @@ async function initXR() {
     if (state === BABYLON.WebXRState.IN_XR) {
       setStatus("Entered AR");
       snapshotPanel.setEnabled(false);
+
+      // 进入 XR 时重置 pinch 状态，避免刚进来误触发
+      leftPinchArmed = false;
+      rightPinchArmed = false;
+      leftPinchState = false;
+      rightPinchState = false;
     } else if (state === BABYLON.WebXRState.ENTERING_XR) {
       setStatus("Entering AR...");
     } else if (state === BABYLON.WebXRState.EXITING_XR) {
@@ -381,17 +399,29 @@ function tryEnableHandTracking() {
       if (inputSource.inputSource && inputSource.inputSource.hand) {
         if (inputSource.inputSource.handedness === "left") {
           leftHandInput = inputSource;
+          leftPinchArmed = false;
+          leftPinchState = false;
           console.log("Left hand detected");
         } else if (inputSource.inputSource.handedness === "right") {
           rightHandInput = inputSource;
+          rightPinchArmed = false;
+          rightPinchState = false;
           console.log("Right hand detected");
         }
       }
     });
 
     xrHelper.input.onControllerRemovedObservable.add((inputSource) => {
-      if (leftHandInput === inputSource) leftHandInput = null;
-      if (rightHandInput === inputSource) rightHandInput = null;
+      if (leftHandInput === inputSource) {
+        leftHandInput = null;
+        leftPinchArmed = false;
+        leftPinchState = false;
+      }
+      if (rightHandInput === inputSource) {
+        rightHandInput = null;
+        rightPinchArmed = false;
+        rightPinchState = false;
+      }
     });
   } catch (err) {
     console.warn("Hand tracking not enabled:", err);
@@ -454,12 +484,12 @@ function getJointPosition(handInput, jointName) {
   }
 }
 
-function detectPinch(handInput) {
+function getPinchDistance(handInput) {
   const thumbTip = getJointPosition(handInput, "thumb-tip");
   const indexTip = getJointPosition(handInput, "index-finger-tip");
 
-  if (!thumbTip || !indexTip) return false;
-  return BABYLON.Vector3.Distance(thumbTip, indexTip) < pinchThreshold;
+  if (!thumbTip || !indexTip) return null;
+  return BABYLON.Vector3.Distance(thumbTip, indexTip);
 }
 
 function detectFist(handInput) {
@@ -475,8 +505,7 @@ function detectFist(handInput) {
     (BABYLON.Vector3.Distance(wrist, indexTip) +
       BABYLON.Vector3.Distance(wrist, middleTip) +
       BABYLON.Vector3.Distance(wrist, ringTip) +
-      BABYLON.Vector3.Distance(wrist, pinkyTip)) /
-    4;
+      BABYLON.Vector3.Distance(wrist, pinkyTip)) / 4;
 
   return avg < fistThreshold;
 }
@@ -585,7 +614,7 @@ function updateFingerDrawing() {
 
 // ---------- XR interactions ----------
 
-// pinch 在任何模式下都必须触发截图
+// 必须先 release，再 pinch，才触发新的 snapshot
 function maybeTriggerSnapshotFromPinch() {
   if (
     !xrHelper ||
@@ -597,23 +626,52 @@ function maybeTriggerSnapshotFromPinch() {
 
   const now = nowMs();
 
-  const leftPinching = detectPinch(leftHandInput);
-  const rightPinching = detectPinch(rightHandInput);
+  const leftDist = getPinchDistance(leftHandInput);
+  const rightDist = getPinchDistance(rightHandInput);
 
-  const leftRising = leftPinching && !wasPinchingLeft;
-  const rightRising = rightPinching && !wasPinchingRight;
+  // LEFT
+  if (leftDist !== null) {
+    if (leftDist > pinchReleaseThreshold) {
+      leftPinchArmed = true;
+      leftPinchState = false;
+    } else if (
+      leftPinchArmed &&
+      leftDist < pinchThreshold &&
+      !leftPinchState &&
+      now - lastPinchTime > pinchCooldownMs
+    ) {
+      lastPinchTime = now;
+      leftPinchState = true;
+      leftPinchArmed = false;
 
-  if ((leftRising || rightRising) && now - lastPinchTime > pinchCooldownMs) {
-    lastPinchTime = now;
-
-    updateSnapshotFromCurrentVideoFrame();
-    placePanelAtLeftFollow();
-
-    setStatus(`Snapshot updated by pinch (mode=${mode})`);
+      updateSnapshotFromCurrentVideoFrame();
+      placePanelAtLeftFollow();
+      setStatus(`Snapshot updated by LEFT pinch (mode=${mode})`);
+      return;
+    }
   }
 
-  wasPinchingLeft = leftPinching;
-  wasPinchingRight = rightPinching;
+  // RIGHT
+  if (rightDist !== null) {
+    if (rightDist > pinchReleaseThreshold) {
+      rightPinchArmed = true;
+      rightPinchState = false;
+    } else if (
+      rightPinchArmed &&
+      rightDist < pinchThreshold &&
+      !rightPinchState &&
+      now - lastPinchTime > pinchCooldownMs
+    ) {
+      lastPinchTime = now;
+      rightPinchState = true;
+      rightPinchArmed = false;
+
+      updateSnapshotFromCurrentVideoFrame();
+      placePanelAtLeftFollow();
+      setStatus(`Snapshot updated by RIGHT pinch (mode=${mode})`);
+      return;
+    }
+  }
 }
 
 // 抓住 snapshot 一次 = 进入/退出 draw
@@ -676,7 +734,7 @@ async function bootstrap() {
   await initXR();
 
   engine.runRenderLoop(() => {
-    // 只要 panel 已经生成，就持续跟随视线左边
+    // panel 已经生成后，持续跟随到左前方
     if (snapshotPanel && snapshotPanel.isEnabled()) {
       placePanelAtLeftFollow();
     }
