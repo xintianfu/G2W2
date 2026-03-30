@@ -1,37 +1,28 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta
     name="viewport"
-    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no"
   />
-  <title>Quest Snapshot Panel</title>
-  <link rel="stylesheet" href="./style.css" />
+  <title>Quest AR Hand Tracking</title>
+  <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <div id="hud">
-    <div class="hud-card">
-      <h1>Snapshot Panel</h1>
-      <p id="status">Status: loading...</p>
-      <p>
-        XR logic:
-        <br />
-        pinch = new snapshot
-        <br />
-        grab snapshot = toggle draw
-        <br />
-        finger draws only on panel
-      </p>
-    </div>
+  <div id="status">状态：正在加载...</div>
+
+  <canvas id="renderCanvas"></canvas>
+  <video id="cameraVideo" playsinline muted autoplay></video>
+  <canvas id="snapshotPreview" width="512" height="512"></canvas>
+
+  <div id="helpPanel">
+    <div><b>使用方法</b></div>
+    <div>1. 点击页面里的 <b>START AR</b> / <b>ENTER AR</b></div>
+    <div>2. 右手 pinch：截图</div>
+    <div>3. 左手靠近面板 pinch：抓取并移动</div>
   </div>
 
-  <video id="cameraVideo" autoplay playsinline muted></video>
-  <canvas id="snapshotPreview"></canvas>
-  <canvas id="renderCanvas"></canvas>
-
-  <script src="https://cdn.babylonjs.com/babylon.js"></script>
-  <script src="https://cdn.babylonjs.com/gui/babylon.gui.min.js"></script>
-  <script src="./app.js"></script>
+  <script type="module" src="./app.js"></script>
 </body>
 </html>

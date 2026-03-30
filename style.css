@@ -1,30 +1,68 @@
-body { 
-        margin: 0; 
-        padding: 0;
-        width: 100vw; 
-        height: 100vh;
-        overflow: hidden; 
-        background-color: #000; 
-        font-family: sans-serif;
-    }
-    #renderCanvas { 
-        position: absolute;
-        top: 0; left: 0;
-        width: 100%; height: 100%; 
-    }
-    #status { 
-        position: absolute; 
-        top: 20px; left: 20px; 
-        color: #0f0; 
-        z-index: 1000; 
-        background: rgba(0,0,0,0.8); 
-        padding: 15px; 
-        border-radius: 8px;
-        pointer-events: none;
-        line-height: 1.5;
-    }
-    /* 强行让 ARButton 显眼一点 */
-    button {
-        border: 2px solid #fff !important;
-        font-weight: bold !important;
-    }
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  font-family: Arial, sans-serif;
+}
+
+#renderCanvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: block;
+  z-index: 0;
+  touch-action: none;
+}
+
+#cameraVideo {
+  display: none;
+}
+
+#status {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  z-index: 10000;
+  color: #00ff66;
+  font-size: 24px;
+  font-weight: bold;
+  text-shadow: 0 0 6px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+
+#snapshotPreview {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: 160px;
+  height: 160px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-radius: 12px;
+  z-index: 10000;
+}
+
+#helpPanel {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 10000;
+  color: white;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 16px;
+  line-height: 1.5;
+  max-width: 360px;
+  backdrop-filter: blur(4px);
+}
+
+#helpPanel b {
+  color: #7dd3fc;
+}

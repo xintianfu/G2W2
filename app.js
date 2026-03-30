@@ -1,15 +1,15 @@
-const canvas = document.getElementById("renderCanvas");
-const video = document.getElementById("cameraVideo");
-const statusEl = document.getElementById("status");
-
-const snapshotPreview = document.getElementById("snapshotPreview");
-const previewCtx = snapshotPreview.getContext("2d");
-snapshotPreview.width = 512;
-snapshotPreview.height = 512;
-
 import * as THREE from "three";
 import { ARButton } from "three/addons/webxr/ARButton.js";
 import { XRHandModelFactory } from "three/addons/webxr/XRHandModelFactory.js";
+
+const canvas = document.getElementById("renderCanvas");
+const video = document.getElementById("cameraVideo");
+const statusEl = document.getElementById("status");
+const snapshotPreview = document.getElementById("snapshotPreview");
+
+const previewCtx = snapshotPreview.getContext("2d");
+snapshotPreview.width = 512;
+snapshotPreview.height = 512;
 
 let scene, camera, renderer;
 let panelMesh, panelMaterial, panelTexture;
@@ -18,6 +18,9 @@ let panelCanvas, panelCtx;
 let leftHand = null;
 let rightHand = null;
 
+let leftPinchMarker = null;
+let rightPinchMarker = null;
+
 let isGrabbing = false;
 let grabOffset = new THREE.Vector3();
 
@@ -25,8 +28,8 @@ let wasPinchingLeft = false;
 let wasPinchingRight = false;
 let lastPinchTime = 0;
 
-const pinchThreshold = 0.03;        // 3cm
-const grabDistanceThreshold = 0.10; // 10cm
+const pinchThreshold = 0.025;        // 2.5cm
+const grabDistanceThreshold = 0.12;  // 12cm
 const pinchCooldownMs = 1200;
 
 const PANEL_TEX_WIDTH = 1024;
@@ -34,13 +37,14 @@ const PANEL_TEX_HEIGHT = 1024;
 const PANEL_WORLD_WIDTH = 0.42;
 const PANEL_WORLD_HEIGHT = 0.28;
 
-const tmpVecA = new THREE.Vector3();
-const tmpVecB = new THREE.Vector3();
-const tmpVecC = new THREE.Vector3();
-const tmpQuat = new THREE.Quaternion();
+const tmpThumb = new THREE.Vector3();
+const tmpIndex = new THREE.Vector3();
+const tmpMid = new THREE.Vector3();
+const tmpPanelPos = new THREE.Vector3();
+const tmpCamPos = new THREE.Vector3();
 
 function setStatus(text) {
-  statusEl.textContent = `Status: ${text}`;
+  statusEl.textContent = `状态：${text}`;
   console.log(text);
 }
 
@@ -55,17 +59,17 @@ function updatePreviewFromPanelCanvas() {
 
 function saveSnapshotToLocal() {
   try {
-    const dataURL = panelCanvas.toDataURL("image/jpeg", 0.9);
+    const dataURL = panelCanvas.toDataURL("image/jpeg", 0.92);
     const link = document.createElement("a");
     link.href = dataURL;
     link.download = `Quest_Shot_${Date.now()}.jpg`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    setStatus("Saved!");
+    setStatus("已保存截图");
   } catch (e) {
     console.error(e);
-    setStatus("Save Failed");
+    setStatus("保存失败");
   }
 }
 
@@ -85,14 +89,19 @@ function placePanelAtCurrentView() {
   const data = getCameraPose();
   if (!data || !panelMesh) return;
 
-  const targetPos = data.camPos.clone().add(data.forward.multiplyScalar(0.6));
+  const targetPos = data.camPos.clone().add(data.forward.multiplyScalar(0.65));
   panelMesh.position.copy(targetPos);
   panelMesh.lookAt(data.camPos);
   panelMesh.visible = true;
+
+  setStatus("面板已生成");
 }
 
 function updateSnapshotFromCurrentVideoFrame() {
-  if (!video.videoWidth || video.videoWidth < 100) return;
+  if (!video.videoWidth || video.videoWidth < 100) {
+    setStatus("摄像头还没准备好");
+    return;
+  }
 
   panelCtx.setTransform(1, 0, 0, 1, 0, 0);
   panelCtx.clearRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
@@ -114,7 +123,6 @@ function updateSnapshotFromCurrentVideoFrame() {
     offsetY = (PANEL_TEX_HEIGHT - drawHeight) / 2;
   }
 
-  // 镜像绘制
   panelCtx.save();
   panelCtx.translate(PANEL_TEX_WIDTH / 2, PANEL_TEX_HEIGHT / 2);
   panelCtx.scale(-1, 1);
@@ -141,52 +149,72 @@ async function startCamera() {
 
     video.srcObject = stream;
     await video.play();
-    setStatus("Camera OK");
+    setStatus("摄像头已启动");
   } catch (e) {
     console.error(e);
-    setStatus("Camera Error");
+    setStatus("摄像头启动失败");
   }
+}
+
+function createMarker(color = 0xff0000) {
+  const geometry = new THREE.SphereGeometry(0.012, 16, 16);
+  const material = new THREE.MeshBasicMaterial({ color });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.visible = false;
+  scene.add(mesh);
+  return mesh;
 }
 
 function getJointWorldPosition(hand, jointName, outVec) {
   if (!hand) return false;
+  if (!hand.joints) return false;
 
   const joint = hand.joints[jointName];
-  if (!joint || !joint.visible) return false;
+  if (!joint) return false;
+  if (!joint.visible) return false;
 
   joint.getWorldPosition(outVec);
   return true;
 }
 
-function getPinchState(hand, outPinchPoint) {
-  const okThumb = getJointWorldPosition(hand, "thumb-tip", tmpVecA);
-  const okIndex = getJointWorldPosition(hand, "index-finger-tip", tmpVecB);
+function getPinchState(hand, markerMesh = null) {
+  const okThumb = getJointWorldPosition(hand, "thumb-tip", tmpThumb);
+  const okIndex = getJointWorldPosition(hand, "index-finger-tip", tmpIndex);
 
-  if (!okThumb || !okIndex) return { valid: false, pinching: false };
+  if (!okThumb || !okIndex) {
+    if (markerMesh) markerMesh.visible = false;
+    return {
+      valid: false,
+      pinching: false,
+      pinchPoint: null,
+      distance: Infinity
+    };
+  }
 
-  const dist = tmpVecA.distanceTo(tmpVecB);
-  outPinchPoint.copy(tmpVecA).add(tmpVecB).multiplyScalar(0.5);
+  const pinchPoint = tmpMid.copy(tmpThumb).add(tmpIndex).multiplyScalar(0.5);
+  const distance = tmpThumb.distanceTo(tmpIndex);
+
+  if (markerMesh) {
+    markerMesh.position.copy(pinchPoint);
+    markerMesh.visible = true;
+  }
 
   return {
     valid: true,
-    pinching: dist < pinchThreshold,
-    distance: dist
+    pinching: distance < pinchThreshold,
+    pinchPoint: pinchPoint.clone(),
+    distance
   };
 }
 
 function orientPanelTowardCamera() {
   if (!panelMesh || !camera) return;
-  const camPos = new THREE.Vector3();
-  camera.getWorldPosition(camPos);
-  panelMesh.lookAt(camPos);
+  camera.getWorldPosition(tmpCamPos);
+  panelMesh.lookAt(tmpCamPos);
 }
 
-function updateHandsLogic() {
-  if (!renderer.xr.isPresenting) return;
-
-  // ---------- 左手 ----------
-  const leftPinchPoint = new THREE.Vector3();
-  const leftState = getPinchState(leftHand, leftPinchPoint);
+function updateLeftHandLogic() {
+  const leftState = getPinchState(leftHand, leftPinchMarker);
 
   if (
     leftState.valid &&
@@ -194,15 +222,17 @@ function updateHandsLogic() {
     !wasPinchingLeft &&
     panelMesh.visible
   ) {
-    const panelPos = new THREE.Vector3();
-    panelMesh.getWorldPosition(panelPos);
+    panelMesh.getWorldPosition(tmpPanelPos);
+    const distToPanel = leftState.pinchPoint.distanceTo(tmpPanelPos);
 
-    const distToPanel = leftPinchPoint.distanceTo(panelPos);
+    console.log("Left pinch start, distToPanel =", distToPanel);
 
     if (distToPanel < grabDistanceThreshold) {
       isGrabbing = true;
-      grabOffset.copy(panelPos).sub(leftPinchPoint);
-      setStatus("Grabbing (Left)");
+      grabOffset.copy(tmpPanelPos).sub(leftState.pinchPoint);
+      setStatus("左手抓取中");
+    } else {
+      setStatus(`左手 pinch 了，但离面板太远: ${distToPanel.toFixed(3)}m`);
     }
   }
 
@@ -210,22 +240,25 @@ function updateHandsLogic() {
     if (!leftState.valid || !leftState.pinching) {
       isGrabbing = false;
       grabOffset.set(0, 0, 0);
-      setStatus("Ready");
+      setStatus("已松开面板");
     } else {
-      panelMesh.position.copy(leftPinchPoint).add(grabOffset);
+      panelMesh.position.copy(leftState.pinchPoint).add(grabOffset);
       orientPanelTowardCamera();
     }
   }
 
   wasPinchingLeft = !!(leftState.valid && leftState.pinching);
+}
 
-  // ---------- 右手 ----------
-  const rightPinchPoint = new THREE.Vector3();
-  const rightState = getPinchState(rightHand, rightPinchPoint);
+function updateRightHandLogic() {
+  const rightState = getPinchState(rightHand, rightPinchMarker);
 
   if (rightState.valid && rightState.pinching && !wasPinchingRight) {
+    console.log("Right pinch detected");
+
     if (nowMs() - lastPinchTime > pinchCooldownMs) {
       lastPinchTime = nowMs();
+      setStatus("右手 pinch：截图");
       updateSnapshotFromCurrentVideoFrame();
     }
   }
@@ -233,16 +266,29 @@ function updateHandsLogic() {
   wasPinchingRight = !!(rightState.valid && rightState.pinching);
 }
 
+function updateHandsLogic() {
+  if (!renderer.xr.isPresenting) return;
+
+  updateLeftHandLogic();
+  updateRightHandLogic();
+}
+
 function initScene() {
   scene = new THREE.Scene();
 
-  camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+  camera = new THREE.PerspectiveCamera(
+    70,
+    window.innerWidth / window.innerHeight,
+    0.01,
+    20
+  );
 
   renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: true,
     alpha: true
   });
+
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.xr.enabled = true;
@@ -251,17 +297,22 @@ function initScene() {
   light.position.set(0, 1, 0);
   scene.add(light);
 
-  // panel texture canvas
   panelCanvas = document.createElement("canvas");
   panelCanvas.width = PANEL_TEX_WIDTH;
   panelCanvas.height = PANEL_TEX_HEIGHT;
   panelCtx = panelCanvas.getContext("2d");
-  panelCtx.clearRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
+
+  panelCtx.fillStyle = "rgba(0,0,0,0)";
+  panelCtx.fillRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
 
   panelTexture = new THREE.CanvasTexture(panelCanvas);
   panelTexture.needsUpdate = true;
 
-  const geometry = new THREE.PlaneGeometry(PANEL_WORLD_WIDTH, PANEL_WORLD_HEIGHT);
+  const geometry = new THREE.PlaneGeometry(
+    PANEL_WORLD_WIDTH,
+    PANEL_WORLD_HEIGHT
+  );
+
   panelMaterial = new THREE.MeshBasicMaterial({
     map: panelTexture,
     transparent: true,
@@ -272,46 +323,129 @@ function initScene() {
   panelMesh.visible = false;
   scene.add(panelMesh);
 
-  // hands
+  leftPinchMarker = createMarker(0x00ff00);
+  rightPinchMarker = createMarker(0xff0000);
+
   const handModelFactory = new XRHandModelFactory();
 
-  leftHand = renderer.xr.getHand(0);
-  rightHand = renderer.xr.getHand(1);
+  const hand0 = renderer.xr.getHand(0);
+  const hand1 = renderer.xr.getHand(1);
 
-  leftHand.add(handModelFactory.createHandModel(leftHand, "mesh"));
-  rightHand.add(handModelFactory.createHandModel(rightHand, "mesh"));
+  hand0.add(handModelFactory.createHandModel(hand0, "mesh"));
+  hand1.add(handModelFactory.createHandModel(hand1, "mesh"));
 
-  scene.add(leftHand);
-  scene.add(rightHand);
+  scene.add(hand0);
+  scene.add(hand1);
 
-  // connected debug
-  leftHand.addEventListener("connected", (e) => {
-    console.log("Left hand connected", e.data);
-  });
-  rightHand.addEventListener("connected", (e) => {
-    console.log("Right hand connected", e.data);
-  });
+  hand0.addEventListener("connected", (event) => {
+    const handedness = event.data?.handedness;
+    console.log("hand0 connected:", handedness);
 
-  leftHand.addEventListener("disconnected", () => {
-    isGrabbing = false;
-    wasPinchingLeft = false;
-    setStatus("Left hand disconnected");
-  });
-
-  rightHand.addEventListener("disconnected", () => {
-    wasPinchingRight = false;
-    setStatus("Right hand disconnected");
+    if (handedness === "left") {
+      leftHand = hand0;
+      setStatus("检测到左手");
+    } else if (handedness === "right") {
+      rightHand = hand0;
+      setStatus("检测到右手");
+    }
   });
 
-  // AR button
-  document.body.appendChild(
-    ARButton.createButton(renderer, {
-      requiredFeatures: ["hand-tracking"],
-      optionalFeatures: ["local-floor"]
-    })
-  );
+  hand1.addEventListener("connected", (event) => {
+    const handedness = event.data?.handedness;
+    console.log("hand1 connected:", handedness);
+
+    if (handedness === "left") {
+      leftHand = hand1;
+      setStatus("检测到左手");
+    } else if (handedness === "right") {
+      rightHand = hand1;
+      setStatus("检测到右手");
+    }
+  });
+
+  hand0.addEventListener("disconnected", () => {
+    if (leftHand === hand0) {
+      leftHand = null;
+      isGrabbing = false;
+      wasPinchingLeft = false;
+      leftPinchMarker.visible = false;
+      setStatus("左手断开");
+    }
+    if (rightHand === hand0) {
+      rightHand = null;
+      wasPinchingRight = false;
+      rightPinchMarker.visible = false;
+      setStatus("右手断开");
+    }
+  });
+
+  hand1.addEventListener("disconnected", () => {
+    if (leftHand === hand1) {
+      leftHand = null;
+      isGrabbing = false;
+      wasPinchingLeft = false;
+      leftPinchMarker.visible = false;
+      setStatus("左手断开");
+    }
+    if (rightHand === hand1) {
+      rightHand = null;
+      wasPinchingRight = false;
+      rightPinchMarker.visible = false;
+      setStatus("右手断开");
+    }
+  });
 
   window.addEventListener("resize", onWindowResize);
+}
+
+function createARUI() {
+  if (!navigator.xr) {
+    setStatus("当前浏览器不支持 WebXR");
+    return;
+  }
+
+  navigator.xr.isSessionSupported("immersive-ar").then((supported) => {
+    if (!supported) {
+      setStatus("当前设备/浏览器不支持 immersive-ar");
+      return;
+    }
+
+    setStatus("支持 AR，点击按钮进入");
+
+    const arButton = ARButton.createButton(renderer, {
+      requiredFeatures: ["hand-tracking"],
+      optionalFeatures: ["local-floor"]
+    });
+
+    arButton.style.position = "fixed";
+    arButton.style.left = "20px";
+    arButton.style.top = "80px";
+    arButton.style.zIndex = "9999";
+    arButton.style.fontSize = "20px";
+    arButton.style.padding = "12px 18px";
+    arButton.style.background = "#ffffff";
+    arButton.style.color = "#000000";
+    arButton.style.border = "1px solid #000";
+    arButton.style.borderRadius = "8px";
+
+    document.body.appendChild(arButton);
+
+    renderer.xr.addEventListener("sessionstart", () => {
+      setStatus("已进入 AR");
+    });
+
+    renderer.xr.addEventListener("sessionend", () => {
+      setStatus("AR 已退出");
+      isGrabbing = false;
+      wasPinchingLeft = false;
+      wasPinchingRight = false;
+      leftPinchMarker.visible = false;
+      rightPinchMarker.visible = false;
+    });
+  }).catch((err) => {
+    console.error(err);
+    setStatus("AR 支持检测失败");
+  });
 }
 
 function onWindowResize() {
@@ -321,15 +455,21 @@ function onWindowResize() {
 }
 
 async function bootstrap() {
-  initScene();
-  await startCamera();
+  try {
+    initScene();
+    createARUI();
+    await startCamera();
 
-  renderer.setAnimationLoop(() => {
-    updateHandsLogic();
-    renderer.render(scene, camera);
-  });
+    renderer.setAnimationLoop(() => {
+      updateHandsLogic();
+      renderer.render(scene, camera);
+    });
 
-  setStatus("Ready");
+    setStatus("初始化完成，等待进入 AR");
+  } catch (e) {
+    console.error(e);
+    setStatus("初始化失败: " + e.message);
+  }
 }
 
 bootstrap();
