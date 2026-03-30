@@ -1,490 +1,240 @@
-import * as THREE from "three";
-import { XRHandModelFactory } from "three/addons/webxr/XRHandModelFactory.js";
-
 const canvas = document.getElementById("renderCanvas");
 const video = document.getElementById("cameraVideo");
 const statusEl = document.getElementById("status");
-const snapshotPreview = document.getElementById("snapshotPreview");
-const enterARBtn = document.getElementById("enterARBtn");
 
+const snapshotPreview = document.getElementById("snapshotPreview");
 const previewCtx = snapshotPreview.getContext("2d");
 snapshotPreview.width = 512;
 snapshotPreview.height = 512;
 
-let scene, camera, renderer;
-let panelMesh, panelMaterial, panelTexture;
-let panelCanvas, panelCtx;
+let engine, scene, xrHelper;
+let snapshotPanel, snapshotMaterial, snapshotTexture, snapshotTextureCtx;
 
-let leftHand = null;
-let rightHand = null;
+let isDrawing = false;
+let isGrabbing = false; 
+let lastDrawUV = null;
 
-let leftPinchMarker = null;
-let rightPinchMarker = null;
+let leftHandInput = null;
+let rightHandInput = null;
 
-let isGrabbing = false;
-let grabOffset = new THREE.Vector3();
-
-let wasPinchingLeft = false;
-let wasPinchingRight = false;
-let lastPinchTime = 0;
-
-const pinchThreshold = 0.03;        // 3cm
-const grabDistanceThreshold = 0.12; // 12cm
+const pinchThreshold = 0.04;
 const pinchCooldownMs = 1200;
+let lastPinchTime = 0;
+let wasPinchingRight = false;
 
 const PANEL_TEX_WIDTH = 1024;
 const PANEL_TEX_HEIGHT = 1024;
 const PANEL_WORLD_WIDTH = 0.42;
 const PANEL_WORLD_HEIGHT = 0.28;
 
-const tmpThumb = new THREE.Vector3();
-const tmpIndex = new THREE.Vector3();
-const tmpMid = new THREE.Vector3();
-const tmpPanelPos = new THREE.Vector3();
-const tmpCamPos = new THREE.Vector3();
-
 function setStatus(text) {
-  statusEl.textContent = `状态：${text}`;
-  console.log(text);
+    statusEl.textContent = `Status: ${text}`;
+    console.log(text);
 }
 
-function nowMs() {
-  return performance.now();
-}
+function nowMs() { return performance.now(); }
 
-function updatePreviewFromPanelCanvas() {
-  previewCtx.clearRect(0, 0, 512, 512);
-  previewCtx.drawImage(panelCanvas, 0, 0, 512, 512);
-}
+// ---------- 截图与保存逻辑 ----------
+function updateSnapshotFromCurrentVideoFrame() {
+    if (!video.videoWidth || video.videoWidth < 100) return;
+    const ctx = snapshotTextureCtx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
 
-function saveSnapshotToLocal() {
-  try {
-    const dataURL = panelCanvas.toDataURL("image/jpeg", 0.92);
+    const videoAspect = video.videoWidth / video.videoHeight;
+    const texAspect = PANEL_TEX_WIDTH / PANEL_TEX_HEIGHT;
+    let drawWidth, drawHeight, offsetX, offsetY;
+
+    if (videoAspect > texAspect) {
+        drawHeight = PANEL_TEX_HEIGHT;
+        drawWidth = drawHeight * videoAspect;
+        offsetX = (PANEL_TEX_WIDTH - drawWidth) / 2;
+        offsetY = 0;
+    } else {
+        drawWidth = PANEL_TEX_WIDTH;
+        drawHeight = drawWidth / videoAspect;
+        offsetX = 0;
+        offsetY = (PANEL_TEX_HEIGHT - drawHeight) / 2;
+    }
+
+    ctx.save();
+    ctx.translate(PANEL_TEX_WIDTH / 2, PANEL_TEX_HEIGHT / 2);
+    ctx.scale(-1, 1); 
+    ctx.translate(-PANEL_TEX_WIDTH / 2, -PANEL_TEX_HEIGHT / 2);
+    ctx.drawImage(video, offsetX, offsetY, drawWidth, drawHeight);
+    ctx.restore();
+
+    snapshotTexture.update();
+    
+    // 截图后放置在相机前
+    const cam = xrHelper.baseExperience.camera;
+    const forward = cam.getForwardRay(1).direction;
+    snapshotPanel.position = cam.globalPosition.add(forward.scale(0.6));
+    snapshotPanel.lookAt(cam.globalPosition, Math.PI); 
+    snapshotPanel.setEnabled(true);
+
+    // 自动保存
+    const dataURL = snapshotTexture.getContext().canvas.toDataURL("image/jpeg", 0.9);
     const link = document.createElement("a");
     link.href = dataURL;
-    link.download = `Quest_Shot_${Date.now()}.jpg`;
-    document.body.appendChild(link);
+    link.download = `Shot_${Date.now()}.jpg`;
     link.click();
-    document.body.removeChild(link);
-    setStatus("已保存截图");
-  } catch (e) {
-    console.error(e);
-    setStatus("保存失败");
-  }
 }
 
-function getCameraPose() {
-  if (!camera) return null;
+// ---------- 绘画逻辑 (仅限右手) ----------
+function setupPointerLogic() {
+    scene.onPointerObservable.add((pointerInfo) => {
+        // 核心过滤：如果是左手触发的 Pointer 事件，直接无视
+        if (xrHelper && xrHelper.baseExperience.state === BABYLON.WebXRState.IN_XR) {
+            const inputSource = xrHelper.pointerSelection.getPointerContext(pointerInfo.event.pointerId)?.inputSource;
+            if (inputSource && inputSource.handedness === "left") return;
+        }
 
-  const camPos = new THREE.Vector3();
-  const forward = new THREE.Vector3(0, 0, -1);
+        const type = pointerInfo.type;
+        const pickInfo = pointerInfo.pickInfo;
+        const isHit = pickInfo?.hit && pickInfo.pickedMesh === snapshotPanel;
+        const uv = isHit ? pickInfo.getTextureCoordinates() : null;
 
-  camera.getWorldPosition(camPos);
-  forward.applyQuaternion(camera.quaternion).normalize();
-
-  return { camPos, forward };
-}
-
-function placePanelAtCurrentView() {
-  const data = getCameraPose();
-  if (!data || !panelMesh) return;
-
-  const targetPos = data.camPos.clone().add(data.forward.multiplyScalar(0.65));
-  panelMesh.position.copy(targetPos);
-  panelMesh.lookAt(data.camPos);
-  panelMesh.visible = true;
-
-  setStatus("面板已生成");
-}
-
-function updateSnapshotFromCurrentVideoFrame() {
-  if (!video.videoWidth || video.videoWidth < 100) {
-    setStatus("摄像头还没准备好");
-    return;
-  }
-
-  panelCtx.setTransform(1, 0, 0, 1, 0, 0);
-  panelCtx.clearRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
-
-  const videoAspect = video.videoWidth / video.videoHeight;
-  const texAspect = PANEL_TEX_WIDTH / PANEL_TEX_HEIGHT;
-
-  let drawWidth, drawHeight, offsetX, offsetY;
-
-  if (videoAspect > texAspect) {
-    drawHeight = PANEL_TEX_HEIGHT;
-    drawWidth = drawHeight * videoAspect;
-    offsetX = (PANEL_TEX_WIDTH - drawWidth) / 2;
-    offsetY = 0;
-  } else {
-    drawWidth = PANEL_TEX_WIDTH;
-    drawHeight = drawWidth / videoAspect;
-    offsetX = 0;
-    offsetY = (PANEL_TEX_HEIGHT - drawHeight) / 2;
-  }
-
-  panelCtx.save();
-  panelCtx.translate(PANEL_TEX_WIDTH / 2, PANEL_TEX_HEIGHT / 2);
-  panelCtx.scale(-1, 1);
-  panelCtx.translate(-PANEL_TEX_WIDTH / 2, -PANEL_TEX_HEIGHT / 2);
-  panelCtx.drawImage(video, offsetX, offsetY, drawWidth, drawHeight);
-  panelCtx.restore();
-
-  panelTexture.needsUpdate = true;
-  updatePreviewFromPanelCanvas();
-  placePanelAtCurrentView();
-  saveSnapshotToLocal();
-}
-
-async function startCamera() {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: "environment",
-        width: 1280,
-        height: 720
-      },
-      audio: false
+        if (type === BABYLON.PointerEventTypes.POINTERDOWN && uv) {
+            isDrawing = true;
+            lastDrawUV = uv;
+            drawAtUV(uv, true);
+        } else if (type === BABYLON.PointerEventTypes.POINTERMOVE && isDrawing) {
+            if (uv) {
+                drawAtUV(uv, false);
+                lastDrawUV = uv;
+            } else { lastDrawUV = null; }
+        } else if (type === BABYLON.PointerEventTypes.POINTERUP) {
+            isDrawing = false;
+            lastDrawUV = null;
+        }
     });
+}
 
+function drawAtUV(uv, isFirstPoint) {
+    const ctx = snapshotTextureCtx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0); 
+    const x = (1 - uv.x) * PANEL_TEX_WIDTH;
+    const y = (1 - uv.y) * PANEL_TEX_HEIGHT; 
+    ctx.strokeStyle = "#ff3b30";
+    ctx.lineWidth = 10;
+    ctx.lineCap = "round";
+    if (isFirstPoint || !lastDrawUV) {
+        ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = "#ff3b30"; ctx.fill();
+    } else {
+        const pX = (1 - lastDrawUV.x) * PANEL_TEX_WIDTH;
+        const pY = (1 - lastDrawUV.y) * PANEL_TEX_HEIGHT;
+        ctx.beginPath(); ctx.moveTo(pX, pY); ctx.lineTo(x, y); ctx.stroke();
+    }
+    snapshotTexture.update();
+}
+
+// ---------- 手势与搬运逻辑 ----------
+function getJointPos(hand, name) {
+    if (!hand?.inputSource?.hand) return null;
+    const joint = hand.inputSource.hand.get(name);
+    const frame = xrHelper?.baseExperience?.sessionManager?.currentFrame;
+    const ref = xrHelper?.baseExperience?.sessionManager?.referenceSpace;
+    if (!frame || !joint || !ref) return null;
+    const pose = frame.getJointPose(joint, ref);
+    return pose ? new BABYLON.Vector3(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z) : null;
+}
+
+function updateLoop() {
+    if (!xrHelper || xrHelper.baseExperience.state !== BABYLON.WebXRState.IN_XR) return;
+
+    // 1. 左手搬运更新 (如果正在抓取，强行同步)
+    if (isGrabbing && leftHandInput) {
+        const thumb = getJointPos(leftHandInput, "thumb-tip");
+        const index = getJointPos(leftHandInput, "index-finger-tip");
+        if (thumb && index) {
+            const pinchPos = BABYLON.Vector3.Center(thumb, index);
+            const dist = BABYLON.Vector3.Distance(thumb, index);
+            
+            // 如果手指张开，释放抓取
+            if (dist > pinchThreshold + 0.02) {
+                isGrabbing = false;
+                snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
+            } else {
+                // 1:1 跟随，解决反向移动
+                snapshotPanel.setAbsolutePosition(pinchPos);
+                snapshotPanel.lookAt(xrHelper.baseExperience.camera.globalPosition, Math.PI);
+            }
+        }
+    }
+
+    // 2. 右手 Pinch 截图检测
+    const rThumb = getJointPos(rightHandInput, "thumb-tip");
+    const rIndex = getJointPos(rightHandInput, "index-finger-tip");
+    const isPinchingRight = (rThumb && rIndex) ? BABYLON.Vector3.Distance(rThumb, rIndex) < pinchThreshold : false;
+
+    if (isPinchingRight && !wasPinchingRight) {
+        if (nowMs() - lastPinchTime > pinchCooldownMs) {
+            lastPinchTime = nowMs();
+            updateSnapshotFromCurrentVideoFrame();
+        }
+    }
+    wasPinchingRight = isPinchingRight;
+}
+
+// ---------- 启动与初始化 ----------
+async function startCamera() {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
     video.srcObject = stream;
     await video.play();
-    setStatus("摄像头已启动");
-  } catch (e) {
-    console.error(e);
-    setStatus("摄像头启动失败");
-  }
 }
 
-function createMarker(color = 0xff0000) {
-  const geometry = new THREE.SphereGeometry(0.012, 16, 16);
-  const material = new THREE.MeshBasicMaterial({ color });
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.visible = false;
-  scene.add(mesh);
-  return mesh;
-}
+async function initXR() {
+    xrHelper = await scene.createDefaultXRExperienceAsync({
+        uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
+    });
+    
+    xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", { xrInput: xrHelper.input });
 
-function getJointWorldPosition(hand, jointName, outVec) {
-  if (!hand || !hand.joints) return false;
-
-  const joint = hand.joints[jointName];
-  if (!joint) return false;
-  if (!joint.visible) return false;
-
-  joint.getWorldPosition(outVec);
-  return true;
-}
-
-function getPinchState(hand, markerMesh = null) {
-  const okThumb = getJointWorldPosition(hand, "thumb-tip", tmpThumb);
-  const okIndex = getJointWorldPosition(hand, "index-finger-tip", tmpIndex);
-
-  if (!okThumb || !okIndex) {
-    if (markerMesh) markerMesh.visible = false;
-    return {
-      valid: false,
-      pinching: false,
-      pinchPoint: null,
-      distance: Infinity
-    };
-  }
-
-  const pinchPoint = tmpMid.copy(tmpThumb).add(tmpIndex).multiplyScalar(0.5);
-  const distance = tmpThumb.distanceTo(tmpIndex);
-
-  if (markerMesh) {
-    markerMesh.position.copy(pinchPoint);
-    markerMesh.visible = true;
-  }
-
-  return {
-    valid: true,
-    pinching: distance < pinchThreshold,
-    pinchPoint: pinchPoint.clone(),
-    distance
-  };
-}
-
-function orientPanelTowardCamera() {
-  if (!panelMesh || !camera) return;
-  camera.getWorldPosition(tmpCamPos);
-  panelMesh.lookAt(tmpCamPos);
-}
-
-function updateLeftHandLogic() {
-  const leftState = getPinchState(leftHand, leftPinchMarker);
-
-  if (
-    leftState.valid &&
-    leftState.pinching &&
-    !wasPinchingLeft &&
-    panelMesh.visible
-  ) {
-    panelMesh.getWorldPosition(tmpPanelPos);
-    const distToPanel = leftState.pinchPoint.distanceTo(tmpPanelPos);
-
-    console.log("Left pinch start, distToPanel =", distToPanel);
-
-    if (distToPanel < grabDistanceThreshold) {
-      isGrabbing = true;
-      grabOffset.copy(tmpPanelPos).sub(leftState.pinchPoint);
-      setStatus("左手抓取中");
-    } else {
-      setStatus(`左手 pinch 了，但离面板太远: ${distToPanel.toFixed(3)}m`);
-    }
-  }
-
-  if (isGrabbing) {
-    if (!leftState.valid || !leftState.pinching) {
-      isGrabbing = false;
-      grabOffset.set(0, 0, 0);
-      setStatus("已松开面板");
-    } else {
-      panelMesh.position.copy(leftState.pinchPoint).add(grabOffset);
-      orientPanelTowardCamera();
-    }
-  }
-
-  wasPinchingLeft = !!(leftState.valid && leftState.pinching);
-}
-
-function updateRightHandLogic() {
-  const rightState = getPinchState(rightHand, rightPinchMarker);
-
-  if (rightState.valid && rightState.pinching && !wasPinchingRight) {
-    console.log("Right pinch detected");
-
-    if (nowMs() - lastPinchTime > pinchCooldownMs) {
-      lastPinchTime = nowMs();
-      setStatus("右手 pinch：截图");
-      updateSnapshotFromCurrentVideoFrame();
-    }
-  }
-
-  wasPinchingRight = !!(rightState.valid && rightState.pinching);
-}
-
-function updateHandsLogic() {
-  if (!renderer.xr.isPresenting) return;
-
-  updateLeftHandLogic();
-  updateRightHandLogic();
-}
-
-function initHands() {
-  const handModelFactory = new XRHandModelFactory();
-
-  const hand0 = renderer.xr.getHand(0);
-  const hand1 = renderer.xr.getHand(1);
-
-  hand0.add(handModelFactory.createHandModel(hand0, "mesh"));
-  hand1.add(handModelFactory.createHandModel(hand1, "mesh"));
-
-  scene.add(hand0);
-  scene.add(hand1);
-
-  hand0.addEventListener("connected", (event) => {
-    const handedness = event.data?.handedness;
-    console.log("hand0 connected:", handedness);
-
-    if (handedness === "left") {
-      leftHand = hand0;
-      setStatus("检测到左手");
-    } else if (handedness === "right") {
-      rightHand = hand0;
-      setStatus("检测到右手");
-    }
-  });
-
-  hand1.addEventListener("connected", (event) => {
-    const handedness = event.data?.handedness;
-    console.log("hand1 connected:", handedness);
-
-    if (handedness === "left") {
-      leftHand = hand1;
-      setStatus("检测到左手");
-    } else if (handedness === "right") {
-      rightHand = hand1;
-      setStatus("检测到右手");
-    }
-  });
-
-  hand0.addEventListener("disconnected", () => {
-    if (leftHand === hand0) {
-      leftHand = null;
-      isGrabbing = false;
-      wasPinchingLeft = false;
-      if (leftPinchMarker) leftPinchMarker.visible = false;
-      setStatus("左手断开");
-    }
-
-    if (rightHand === hand0) {
-      rightHand = null;
-      wasPinchingRight = false;
-      if (rightPinchMarker) rightPinchMarker.visible = false;
-      setStatus("右手断开");
-    }
-  });
-
-  hand1.addEventListener("disconnected", () => {
-    if (leftHand === hand1) {
-      leftHand = null;
-      isGrabbing = false;
-      wasPinchingLeft = false;
-      if (leftPinchMarker) leftPinchMarker.visible = false;
-      setStatus("左手断开");
-    }
-
-    if (rightHand === hand1) {
-      rightHand = null;
-      wasPinchingRight = false;
-      if (rightPinchMarker) rightPinchMarker.visible = false;
-      setStatus("右手断开");
-    }
-  });
-}
-
-function initScene() {
-  scene = new THREE.Scene();
-
-  camera = new THREE.PerspectiveCamera(
-    70,
-    window.innerWidth / window.innerHeight,
-    0.01,
-    20
-  );
-
-  renderer = new THREE.WebGLRenderer({
-    canvas,
-    antialias: true,
-    alpha: true
-  });
-
-  renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.xr.enabled = true;
-
-  const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1.5);
-  light.position.set(0, 1, 0);
-  scene.add(light);
-
-  panelCanvas = document.createElement("canvas");
-  panelCanvas.width = PANEL_TEX_WIDTH;
-  panelCanvas.height = PANEL_TEX_HEIGHT;
-  panelCtx = panelCanvas.getContext("2d");
-
-  panelCtx.clearRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
-
-  panelTexture = new THREE.CanvasTexture(panelCanvas);
-  panelTexture.needsUpdate = true;
-
-  const geometry = new THREE.PlaneGeometry(
-    PANEL_WORLD_WIDTH,
-    PANEL_WORLD_HEIGHT
-  );
-
-  panelMaterial = new THREE.MeshBasicMaterial({
-    map: panelTexture,
-    transparent: true,
-    side: THREE.DoubleSide
-  });
-
-  panelMesh = new THREE.Mesh(geometry, panelMaterial);
-  panelMesh.visible = false;
-  scene.add(panelMesh);
-
-  leftPinchMarker = createMarker(0x00ff00);
-  rightPinchMarker = createMarker(0xff0000);
-
-  initHands();
-
-  window.addEventListener("resize", onWindowResize);
-}
-
-async function setupManualARButton() {
-  if (!enterARBtn) {
-    setStatus("缺少 #enterARBtn 按钮");
-    return;
-  }
-
-  if (!navigator.xr) {
-    setStatus("当前浏览器不支持 WebXR");
-    enterARBtn.disabled = true;
-    return;
-  }
-
-  try {
-    const supported = await navigator.xr.isSessionSupported("immersive-ar");
-
-    if (!supported) {
-      setStatus("当前环境不支持 immersive-ar");
-      enterARBtn.disabled = true;
-      return;
-    }
-
-    setStatus("支持 immersive-ar，点击按钮进入");
-    enterARBtn.disabled = false;
-
-    enterARBtn.addEventListener("click", async () => {
-      try {
-        setStatus("正在请求 AR 会话...");
-
-        const session = await navigator.xr.requestSession("immersive-ar", {
-          requiredFeatures: ["hand-tracking"],
-          optionalFeatures: ["local-floor"]
-        });
-
-        await renderer.xr.setSession(session);
-
-        setStatus("已进入 AR");
-        enterARBtn.style.display = "none";
-
-        session.addEventListener("end", () => {
-          setStatus("AR 已退出");
-          enterARBtn.style.display = "block";
-          isGrabbing = false;
-          wasPinchingLeft = false;
-          wasPinchingRight = false;
-
-          if (leftPinchMarker) leftPinchMarker.visible = false;
-          if (rightPinchMarker) rightPinchMarker.visible = false;
-        });
-      } catch (e) {
-        console.error(e);
-        setStatus("进入 AR 失败: " + e.message);
-      }
-    }, { once: false });
-
-  } catch (e) {
-    console.error(e);
-    setStatus("AR 支持检测失败: " + e.message);
-    enterARBtn.disabled = true;
-  }
-}
-
-function onWindowResize() {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+    xrHelper.input.onControllerAddedObservable.add((input) => {
+        const side = input.inputSource.handedness;
+        if (side === "left") {
+            leftHandInput = input;
+            // 关键：当左手射线点变蓝并捏合时触发抓取
+            input.onSelectTriggeredObservable.add(() => {
+                const pick = scene.pickWithRay(input.getWorldPointerRay());
+                if (pick.hit && pick.pickedMesh === snapshotPanel) {
+                    isGrabbing = true;
+                    snapshotMaterial.emissiveColor = new BABYLON.Color3(0.5, 0.8, 1); // 变蓝提示抓住
+                }
+            });
+        } else {
+            rightHandInput = input;
+        }
+    });
 }
 
 async function bootstrap() {
-  try {
-    initScene();
-    await setupManualARButton();
+    engine = new BABYLON.Engine(canvas, true);
+    scene = new BABYLON.Scene(engine);
+    scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);
+    new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
+
+    snapshotPanel = BABYLON.MeshBuilder.CreatePlane("snapshotPanel", { width: PANEL_WORLD_WIDTH, height: PANEL_WORLD_HEIGHT, sideOrientation: BABYLON.Mesh.DOUBLESIDE }, scene);
+    snapshotTexture = new BABYLON.DynamicTexture("sTex", { width: PANEL_TEX_WIDTH, height: PANEL_TEX_HEIGHT }, scene);
+    snapshotTextureCtx = snapshotTexture.getContext();
+    
+    snapshotMaterial = new BABYLON.StandardMaterial("sMat", scene);
+    snapshotMaterial.diffuseTexture = snapshotTexture;
+    snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
+    snapshotMaterial.disableLighting = true;
+    snapshotPanel.material = snapshotMaterial;
+    snapshotPanel.setEnabled(false);
+
+    setupPointerLogic();
     await startCamera();
+    await initXR();
 
-    renderer.setAnimationLoop(() => {
-      updateHandsLogic();
-      renderer.render(scene, camera);
+    engine.runRenderLoop(() => {
+        updateLoop();
+        scene.render();
     });
-
-    setStatus("初始化完成，等待进入 AR");
-  } catch (e) {
-    console.error(e);
-    setStatus("初始化失败: " + e.message);
-  }
 }
 
 bootstrap();
