@@ -66,3 +66,21 @@ body {
 #helpPanel b {
   color: #7dd3fc;
 }
+
+#enterARBtn {
+  position: fixed;
+  top: 70px;
+  left: 16px;
+  z-index: 20000;
+  padding: 14px 18px;
+  font-size: 20px;
+  font-weight: bold;
+  border: none;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #000000;
+}
+
+#enterARBtn:disabled {
+  opacity: 0.5;
+}

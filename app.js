@@ -1,11 +1,11 @@
 import * as THREE from "three";
-import { ARButton } from "three/addons/webxr/ARButton.js";
 import { XRHandModelFactory } from "three/addons/webxr/XRHandModelFactory.js";
 
 const canvas = document.getElementById("renderCanvas");
 const video = document.getElementById("cameraVideo");
 const statusEl = document.getElementById("status");
 const snapshotPreview = document.getElementById("snapshotPreview");
+const enterARBtn = document.getElementById("enterARBtn");
 
 const previewCtx = snapshotPreview.getContext("2d");
 snapshotPreview.width = 512;
@@ -28,8 +28,8 @@ let wasPinchingLeft = false;
 let wasPinchingRight = false;
 let lastPinchTime = 0;
 
-const pinchThreshold = 0.025;        // 2.5cm
-const grabDistanceThreshold = 0.12;  // 12cm
+const pinchThreshold = 0.03;        // 3cm
+const grabDistanceThreshold = 0.12; // 12cm
 const pinchCooldownMs = 1200;
 
 const PANEL_TEX_WIDTH = 1024;
@@ -166,8 +166,7 @@ function createMarker(color = 0xff0000) {
 }
 
 function getJointWorldPosition(hand, jointName, outVec) {
-  if (!hand) return false;
-  if (!hand.joints) return false;
+  if (!hand || !hand.joints) return false;
 
   const joint = hand.joints[jointName];
   if (!joint) return false;
@@ -273,59 +272,7 @@ function updateHandsLogic() {
   updateRightHandLogic();
 }
 
-function initScene() {
-  scene = new THREE.Scene();
-
-  camera = new THREE.PerspectiveCamera(
-    70,
-    window.innerWidth / window.innerHeight,
-    0.01,
-    20
-  );
-
-  renderer = new THREE.WebGLRenderer({
-    canvas,
-    antialias: true,
-    alpha: true
-  });
-
-  renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.xr.enabled = true;
-
-  const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1.5);
-  light.position.set(0, 1, 0);
-  scene.add(light);
-
-  panelCanvas = document.createElement("canvas");
-  panelCanvas.width = PANEL_TEX_WIDTH;
-  panelCanvas.height = PANEL_TEX_HEIGHT;
-  panelCtx = panelCanvas.getContext("2d");
-
-  panelCtx.fillStyle = "rgba(0,0,0,0)";
-  panelCtx.fillRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
-
-  panelTexture = new THREE.CanvasTexture(panelCanvas);
-  panelTexture.needsUpdate = true;
-
-  const geometry = new THREE.PlaneGeometry(
-    PANEL_WORLD_WIDTH,
-    PANEL_WORLD_HEIGHT
-  );
-
-  panelMaterial = new THREE.MeshBasicMaterial({
-    map: panelTexture,
-    transparent: true,
-    side: THREE.DoubleSide
-  });
-
-  panelMesh = new THREE.Mesh(geometry, panelMaterial);
-  panelMesh.visible = false;
-  scene.add(panelMesh);
-
-  leftPinchMarker = createMarker(0x00ff00);
-  rightPinchMarker = createMarker(0xff0000);
-
+function initHands() {
   const handModelFactory = new XRHandModelFactory();
 
   const hand0 = renderer.xr.getHand(0);
@@ -368,13 +315,14 @@ function initScene() {
       leftHand = null;
       isGrabbing = false;
       wasPinchingLeft = false;
-      leftPinchMarker.visible = false;
+      if (leftPinchMarker) leftPinchMarker.visible = false;
       setStatus("左手断开");
     }
+
     if (rightHand === hand0) {
       rightHand = null;
       wasPinchingRight = false;
-      rightPinchMarker.visible = false;
+      if (rightPinchMarker) rightPinchMarker.visible = false;
       setStatus("右手断开");
     }
   });
@@ -384,68 +332,135 @@ function initScene() {
       leftHand = null;
       isGrabbing = false;
       wasPinchingLeft = false;
-      leftPinchMarker.visible = false;
+      if (leftPinchMarker) leftPinchMarker.visible = false;
       setStatus("左手断开");
     }
+
     if (rightHand === hand1) {
       rightHand = null;
       wasPinchingRight = false;
-      rightPinchMarker.visible = false;
+      if (rightPinchMarker) rightPinchMarker.visible = false;
       setStatus("右手断开");
     }
   });
+}
+
+function initScene() {
+  scene = new THREE.Scene();
+
+  camera = new THREE.PerspectiveCamera(
+    70,
+    window.innerWidth / window.innerHeight,
+    0.01,
+    20
+  );
+
+  renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: true,
+    alpha: true
+  });
+
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.xr.enabled = true;
+
+  const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1.5);
+  light.position.set(0, 1, 0);
+  scene.add(light);
+
+  panelCanvas = document.createElement("canvas");
+  panelCanvas.width = PANEL_TEX_WIDTH;
+  panelCanvas.height = PANEL_TEX_HEIGHT;
+  panelCtx = panelCanvas.getContext("2d");
+
+  panelCtx.clearRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
+
+  panelTexture = new THREE.CanvasTexture(panelCanvas);
+  panelTexture.needsUpdate = true;
+
+  const geometry = new THREE.PlaneGeometry(
+    PANEL_WORLD_WIDTH,
+    PANEL_WORLD_HEIGHT
+  );
+
+  panelMaterial = new THREE.MeshBasicMaterial({
+    map: panelTexture,
+    transparent: true,
+    side: THREE.DoubleSide
+  });
+
+  panelMesh = new THREE.Mesh(geometry, panelMaterial);
+  panelMesh.visible = false;
+  scene.add(panelMesh);
+
+  leftPinchMarker = createMarker(0x00ff00);
+  rightPinchMarker = createMarker(0xff0000);
+
+  initHands();
 
   window.addEventListener("resize", onWindowResize);
 }
 
-function createARUI() {
-  if (!navigator.xr) {
-    setStatus("当前浏览器不支持 WebXR");
+async function setupManualARButton() {
+  if (!enterARBtn) {
+    setStatus("缺少 #enterARBtn 按钮");
     return;
   }
 
-  navigator.xr.isSessionSupported("immersive-ar").then((supported) => {
+  if (!navigator.xr) {
+    setStatus("当前浏览器不支持 WebXR");
+    enterARBtn.disabled = true;
+    return;
+  }
+
+  try {
+    const supported = await navigator.xr.isSessionSupported("immersive-ar");
+
     if (!supported) {
-      setStatus("当前设备/浏览器不支持 immersive-ar");
+      setStatus("当前环境不支持 immersive-ar");
+      enterARBtn.disabled = true;
       return;
     }
 
-    setStatus("支持 AR，点击按钮进入");
+    setStatus("支持 immersive-ar，点击按钮进入");
+    enterARBtn.disabled = false;
 
-    const arButton = ARButton.createButton(renderer, {
-      requiredFeatures: ["hand-tracking"],
-      optionalFeatures: ["local-floor"]
-    });
+    enterARBtn.addEventListener("click", async () => {
+      try {
+        setStatus("正在请求 AR 会话...");
 
-    arButton.style.position = "fixed";
-    arButton.style.left = "20px";
-    arButton.style.top = "80px";
-    arButton.style.zIndex = "9999";
-    arButton.style.fontSize = "20px";
-    arButton.style.padding = "12px 18px";
-    arButton.style.background = "#ffffff";
-    arButton.style.color = "#000000";
-    arButton.style.border = "1px solid #000";
-    arButton.style.borderRadius = "8px";
+        const session = await navigator.xr.requestSession("immersive-ar", {
+          requiredFeatures: ["hand-tracking"],
+          optionalFeatures: ["local-floor"]
+        });
 
-    document.body.appendChild(arButton);
+        await renderer.xr.setSession(session);
 
-    renderer.xr.addEventListener("sessionstart", () => {
-      setStatus("已进入 AR");
-    });
+        setStatus("已进入 AR");
+        enterARBtn.style.display = "none";
 
-    renderer.xr.addEventListener("sessionend", () => {
-      setStatus("AR 已退出");
-      isGrabbing = false;
-      wasPinchingLeft = false;
-      wasPinchingRight = false;
-      leftPinchMarker.visible = false;
-      rightPinchMarker.visible = false;
-    });
-  }).catch((err) => {
-    console.error(err);
-    setStatus("AR 支持检测失败");
-  });
+        session.addEventListener("end", () => {
+          setStatus("AR 已退出");
+          enterARBtn.style.display = "block";
+          isGrabbing = false;
+          wasPinchingLeft = false;
+          wasPinchingRight = false;
+
+          if (leftPinchMarker) leftPinchMarker.visible = false;
+          if (rightPinchMarker) rightPinchMarker.visible = false;
+        });
+      } catch (e) {
+        console.error(e);
+        setStatus("进入 AR 失败: " + e.message);
+      }
+    }, { once: false });
+
+  } catch (e) {
+    console.error(e);
+    setStatus("AR 支持检测失败: " + e.message);
+    enterARBtn.disabled = true;
+  }
 }
 
 function onWindowResize() {
@@ -457,7 +472,7 @@ function onWindowResize() {
 async function bootstrap() {
   try {
     initScene();
-    createARUI();
+    await setupManualARButton();
     await startCamera();
 
     renderer.setAnimationLoop(() => {
