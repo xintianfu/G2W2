@@ -167,13 +167,16 @@ async function startCamera() {
 
 async function initXR() {
     xrHelper = await scene.createDefaultXRExperienceAsync({
-        uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
+        uiOptions: { 
+            sessionMode: "immersive-ar", 
+            referenceSpaceType: "local-floor" 
+        }
     });
 
-    xrHelper.baseExperience.onStateChangedObservable.add((state) => {
-        if (state === BABYLON.WebXRState.IN_XR) {
-            xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", { xrInput: xrHelper.input });
-        }
+    // 强制开启手势特征
+    xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", {
+        xrInput: xrHelper.input,
+        jointMeshes: { disableDefaultMeshes: false } // 如果想看手，这里设为 false
     });
 
     xrHelper.input.onControllerAddedObservable.add((input) => {
@@ -182,26 +185,29 @@ async function initXR() {
         if (side === "left") {
             leftHandInput = input;
             
-            // --- 关键修改：直接利用系统的“选中并捏合”事件 ---
-            // 当射线圆点变蓝并捏合时，触发这个
+            // 重点修复：不管它是手还是控制器，Select 触发就代表捏合了
             input.onSelectTriggeredObservable.add(() => {
-                const pick = scene.pickWithRay(input.getWorldPointerRay());
+                // 使用射线检测
+                const ray = input.getWorldPointerRay();
+                const pick = scene.pickWithRay(ray);
+                
                 if (pick.hit && pick.pickedMesh === snapshotPanel) {
                     isGrabbingLeft = true;
-                    snapshotMaterial.emissiveColor = new BABYLON.Color3(0, 0.7, 1); // 变蓝反馈
-                    setStatus("左手已锁定搬运");
+                    // 反馈：变蓝色说明抓住了
+                    snapshotMaterial.emissiveColor = new BABYLON.Color3(0, 0.6, 1);
+                    setStatus("左手已抓取 (控制器模式)");
                 }
             });
 
-            // 当松开 Pinch 时，释放搬运
+            // 松开捏合
             input.onSelectExitedObservable.add(() => {
                 if (isGrabbingLeft) {
                     isGrabbingLeft = false;
                     snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
-                    setStatus("左手已松开");
+                    setStatus("左手已释放");
                 }
             });
-        } else if (side === "right") {
+        } else {
             rightHandInput = input;
         }
     });
