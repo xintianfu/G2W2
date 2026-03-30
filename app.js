@@ -29,7 +29,7 @@ let currentCameraStream = null;
 // 手势配置
 let leftHandInput = null;
 let rightHandInput = null;
-const pinchThreshold = 0.02;
+const pinchThreshold = 0.04;
 const pinchCooldownMs = 1000; // 稍微缩短冷却时间，提升手感
 let lastPinchTime = 0;
 let wasPinchingRight = false;
@@ -82,8 +82,8 @@ function placePanelAtCurrentView() {
 
   const { camPos, forward, right } = data;
   
-  // 放在当前转头方向的前方 0.6米，左侧 0.1米
-  const targetPos = camPos.add(forward.scale(0.6)).add(left.scale(0.1));
+  // 放在当前转头方向的前方 0.6米，右侧 0.1米
+  const targetPos = camPos.add(forward.scale(0.6)).add(right.scale(0.1));
   
   snapshotPanel.position.copyFrom(targetPos);
   snapshotPanel.lookAt(camPos); // 面板始终面向用户
@@ -306,7 +306,12 @@ async function bootstrap() {
   // 面板初始化
   snapshotPanel = BABYLON.MeshBuilder.CreatePlane("snapshotPanel", { width: PANEL_WORLD_WIDTH, height: PANEL_WORLD_HEIGHT, sideOrientation: BABYLON.Mesh.DOUBLESIDE }, scene);
   snapshotTexture = new BABYLON.DynamicTexture("sTex", { width: PANEL_TEX_WIDTH, height: PANEL_TEX_HEIGHT }, scene);
-  snapshotTexture.vScale = -1;//镜面反转
+  
+  // --- 核心修复：解决镜像问题 ---
+  // 将纹理在 V 轴（垂直方向）上翻转，使其与 Canvas 坐标系一致
+  snapshotTexture.vScale = -1; 
+  // ------------------------------
+
   snapshotTextureCtx = snapshotTexture.getContext();
   const mat = new BABYLON.StandardMaterial("sMat", scene);
   mat.diffuseTexture = snapshotTexture;
