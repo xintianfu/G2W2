@@ -11,13 +11,12 @@ let isDrawing = false;
 let lastDrawUV = null;
 let lastPinchTime = 0;
 const pinchCooldownMs = 1200;
-const pinchThreshold = 0.04;
 let wasPinchingRight = false;
 
-// 抓取状态
+// 搬运状态
 let isGrabbingLeft = false;
 
-// 面板物理与纹理尺寸
+// 面板与纹理参数
 const PANEL_TEX_SIZE = 1024;
 const PANEL_WORLD_WIDTH = 0.42;
 const PANEL_WORLD_HEIGHT = 0.28;
@@ -27,37 +26,45 @@ function setStatus(text) {
     console.log(text);
 }
 
-// ---------- 1. 核心修复：左手坐标镜像矫正 ----------
-function getCorrectedLeftPos(controller) {
+// ---------- 1. 坐标修正：解决左手飞到身后和移动反向 ----------
+function getCorrectedPosition(controller) {
     let rawPos = controller.pointer.position;
-    // 解决左手瞬移到身后、移动反向的问题：反转 X 和 Z 轴
+    // 【核心修正】反转水平面的 X 和 Z 坐标
+    // 这会将设备误判在“身后镜像区”的点强制拉回到“面前交互区”
     return new BABYLON.Vector3(-rawPos.x, rawPos.y, -rawPos.z);
 }
 
-// ---------- 2. 核心修复：截图与内容镜像修正 ----------
+// ---------- 2. 截图更新：捕获当前视角的实时画面 ----------
 function updateSnapshot() {
-    if (!video.videoWidth || video.readyState < 2) return;
+    if (!video.videoWidth || video.readyState < 2) {
+        setStatus("Waiting for real-time video...");
+        return;
+    }
 
     const ctx = snapshotTextureCtx;
+    // 强制重置绘图矩阵，防止 Canvas 状态锁死
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, PANEL_TEX_SIZE, PANEL_TEX_SIZE);
 
-    // 绘制前进行水平翻转，确保快照内容方位正确（不反）
+    // 修正内容左右反转，让快照里的文字变正
     ctx.save();
     ctx.translate(PANEL_TEX_SIZE, 0);
-    ctx.scale(-1, 1);
+    ctx.scale(-1, 1); 
+    // 抓取 video 元素此时此刻的实时像素帧
     ctx.drawImage(video, 0, 0, PANEL_TEX_SIZE, PANEL_TEX_SIZE);
     ctx.restore();
 
-    snapshotTexture.update();
+    // 强行刷新纹理到 GPU
+    snapshotTexture.update(true);
 
-    // 将面板放置在当前相机视线前方 0.5m
+    // 将面板放置在此时相机的正前方 0.5m
     const cam = xrHelper.baseExperience.camera;
     const forward = cam.getForwardRay(1).direction;
     snapshotPanel.position = cam.globalPosition.add(forward.scale(0.5));
-    snapshotPanel.lookAt(cam.globalPosition, Math.PI);
+    snapshotPanel.lookAt(cam.globalPosition, Math.PI); 
     snapshotPanel.setEnabled(true);
-    setStatus("Snapshot Updated (Browse Mode)");
+
+    setStatus("Snapshot Captured: " + new Date().toLocaleTimeString());
 }
 
 // ---------- 3. 绘图逻辑：射线笔迹绘制 ----------
@@ -65,21 +72,21 @@ function drawLineOnTexture(uv1, uv2) {
     const ctx = snapshotTextureCtx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     
-    // 将 UV 坐标映射到纹理像素（考虑镜像适配）
+    // 适配镜像后的纹理 X 轴映射
     const x1 = (1 - uv1.x) * PANEL_TEX_SIZE;
     const y1 = (1 - uv1.y) * PANEL_TEX_SIZE;
     const x2 = (1 - uv2.x) * PANEL_TEX_SIZE;
     const y2 = (1 - uv2.y) * PANEL_TEX_SIZE;
 
     ctx.strokeStyle = "#ff3b30";
-    ctx.lineWidth = 10;
+    ctx.lineWidth = 12;
     ctx.lineCap = "round";
     ctx.beginPath();
     ctx.moveTo(x1, y1);
     ctx.lineTo(x2, y2);
     ctx.stroke();
 
-    snapshotTexture.update();
+    snapshotTexture.update(true);
 }
 
 // ---------- 4. 交互逻辑：模式切换与 Pointer 监听 ----------
@@ -96,28 +103,22 @@ function setupPointerLogic() {
 
         const uv = pick.getTextureCoordinates();
 
-        // A. 模式切换：快速点击面板（POINTERDOWN）
+        // 点击面板切换到绘画模式
         if (type === BABYLON.PointerEventTypes.POINTERDOWN) {
-            const now = performance.now();
-            // 如果不是在连续绘图，则判定为“点击切换”
-            if (!isDrawing) {
-                mode = (mode === "browse") ? "draw" : "browse";
-                setStatus(`Mode: ${mode.toUpperCase()}`);
-            }
-
-            if (mode === "draw" && uv) {
+            if (mode === "browse") {
+                mode = "draw";
+                setStatus("Mode: DRAWING");
+            } else {
                 isDrawing = true;
                 lastDrawUV = uv;
             }
-        }
-
-        // B. 绘图：POINTERMOVE (仅在 Draw 模式下有效)
+        } 
+        // 绘画移动
         else if (type === BABYLON.PointerEventTypes.POINTERMOVE && mode === "draw" && isDrawing && uv) {
             if (lastDrawUV) drawLineOnTexture(lastDrawUV, uv);
             lastDrawUV = uv;
-        }
-
-        // C. 抬笔
+        } 
+        // 抬笔
         else if (type === BABYLON.PointerEventTypes.POINTERUP) {
             isDrawing = false;
             lastDrawUV = null;
@@ -137,7 +138,7 @@ function updateLoop() {
         if (side === "left") {
             if (isTriggered && snapshotPanel.isEnabled()) {
                 isGrabbingLeft = true;
-                const correctedPos = getCorrectedLeftPos(controller);
+                const correctedPos = getCorrectedPosition(controller);
                 snapshotPanel.setAbsolutePosition(correctedPos);
                 snapshotPanel.lookAt(xrHelper.baseExperience.camera.globalPosition, Math.PI);
             } else {
@@ -145,18 +146,16 @@ function updateLoop() {
             }
         } 
         
-        // --- 右手：截图指令 (仅在 Browse 模式下监听捏合) ---
+        // --- 右手：截图指令 (仅在非绘图点击状态下触发) ---
         else if (side === "right") {
-            if (mode === "browse") {
-                if (isTriggered && !wasPinchingRight) {
-                    const now = performance.now();
-                    if (now - lastPinchTime > pinchCooldownMs) {
-                        lastPinchTime = now;
-                        updateSnapshot();
-                    }
+            if (isTriggered && !wasPinchingRight && !isDrawing) {
+                const now = performance.now();
+                if (now - lastPinchTime > pinchCooldownMs) {
+                    lastPinchTime = now;
+                    updateSnapshot();
                 }
-                wasPinchingRight = !!isTriggered;
             }
+            wasPinchingRight = !!isTriggered;
         }
     });
 }
@@ -168,12 +167,12 @@ async function initXR() {
             uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
         });
         
-        // 开启手势追踪特征
+        // 显式开启手势追踪
         xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", {
             xrInput: xrHelper.input
         });
         
-        setStatus("XR Ready. Entry AR.");
+        setStatus("XR Ready. Entered AR.");
     } catch (e) {
         setStatus("XR Failed: " + e.message);
     }
@@ -206,7 +205,7 @@ async function bootstrap() {
         });
         video.srcObject = stream;
         await video.play();
-        setStatus("Camera Connected");
+        setStatus("Camera Real-time Ready");
     } catch (e) { setStatus("Camera Error"); }
 
     await initXR();
