@@ -1,92 +1,67 @@
-/* 基础重置 */
-html, body {
-    margin: 0;
-    padding: 0;
-    width: 100%;
-    height: 100%;
-    overflow: hidden;
-    background-color: #000;
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #111;
+  font-family: Arial, sans-serif;
 }
 
-/* 核心渲染画布 */
 #renderCanvas {
-    width: 100%;
-    height: 100%;
-    /* 关键：防止浏览器拦截 XR 模式下的手势点击 */
-    touch-action: none; 
-    display: block;
-    outline: none;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
 }
 
-/* 状态面板样式 */
-#status-container {
-    position: absolute;
-    top: 25px;
-    left: 25px;
-    z-index: 100;
-    background: rgba(0, 0, 0, 0.8);
-    color: #00ff00; /* 荧光绿：在穿透模式下最易读 */
-    padding: 18px;
-    border-radius: 12px;
-    border: 1px solid #333;
-    pointer-events: none; /* 确保点击能穿透到 Canvas 上 */
-    box-shadow: 0 4px 15px rgba(0,0,0,0.5);
-    max-width: 280px;
+#hud {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  z-index: 10;
+  pointer-events: none;
 }
 
-#status-container h2 {
-    margin: 0 0 8px 0;
-    font-size: 20px;
-    color: #fff;
-    border-bottom: 1px solid #444;
-    padding-bottom: 5px;
+.hud-card {
+  width: 300px;
+  background: rgba(20, 20, 20, 0.86);
+  color: #fff;
+  padding: 12px 14px;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 
-#status {
-    font-size: 15px;
-    font-weight: bold;
-    margin-bottom: 10px;
+.hud-card h1 {
+  margin: 0 0 8px 0;
+  font-size: 20px;
 }
 
-.hint {
-    font-size: 13px;
-    color: #bbb;
-    line-height: 1.6;
+.hud-card p {
+  margin: 6px 0;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
-/* 隐藏视频流 */
 #cameraVideo {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
-    pointer-events: none;
-    visibility: hidden;
+  position: fixed;
+  right: 16px;
+  top: 16px;
+  width: 220px;
+  height: 124px;
+  object-fit: cover;
+  border-radius: 10px;
+  background: black;
+  z-index: 9;
 }
 
-/* 预览画布（调试用） */
 #snapshotPreview {
-    position: absolute;
-    bottom: 20px;
-    right: 20px;
-    width: 160px;
-    height: 100px;
-    border: 2px solid #666;
-    background: #111;
-    z-index: 50;
-    display: none; /* 如果需要实时看到截图结果，可改为 block */
-}
-
-/* 强制美化 Babylon.js 自动生成的 AR/VR 按钮 */
-.babylonVRicon {
-    z-index: 200 !important;
-    border: 2px solid white !important;
-    background-color: rgba(0,0,0,0.6) !important;
-    border-radius: 8px !important;
-    transition: transform 0.2s ease;
-}
-
-.babylonVRicon:hover {
-    transform: scale(1.1);
+  position: fixed;
+  right: 16px;
+  top: 156px;
+  width: 220px;
+  height: 220px;
+  border-radius: 10px;
+  background: #222;
+  z-index: 9;
 }
