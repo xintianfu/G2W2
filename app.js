@@ -109,8 +109,14 @@ function updateSnapshotFromCurrentVideoFrame() {
 function setupPointerLogic() {
     scene.onPointerObservable.add((pointerInfo) => {
         const type = pointerInfo.type;
-        const isHit = pointerInfo.pickInfo?.hit && pointerInfo.pickInfo.pickedMesh === snapshotPanel;
-        const uv = isHit ? pointerInfo.pickInfo.getTextureCoordinates() : null;
+        const pickInfo = pointerInfo.pickInfo;
+        
+        // 关键：检查拾取点是否在面板上，且拾取距离非常近（近距离触碰）或通过射线点击
+        const isHit = pickInfo?.hit && pickInfo.pickedMesh === snapshotPanel;
+        
+        // 如果你想要更严格的手指触碰判定，可以检查 pickInfo.distance
+        // 但通常 Babylon 的 PointerDown 在近距离触碰控制器/手指时会自动触发
+        const uv = isHit ? pickInfo.getTextureCoordinates() : null;
 
         if (type === BABYLON.PointerEventTypes.POINTERDOWN && uv) {
             isDrawing = true;
@@ -118,9 +124,11 @@ function setupPointerLogic() {
             drawAtUV(uv, true);
         } else if (type === BABYLON.PointerEventTypes.POINTERMOVE && isDrawing) {
             if (uv) {
+                // 如果是移动过程中，且 UV 依然有效，则连线
                 drawAtUV(uv, false);
                 lastDrawUV = uv;
             } else {
+                // 如果手指离开了面板表面，断开线条
                 lastDrawUV = null;
             }
         } else if (type === BABYLON.PointerEventTypes.POINTERUP) {
