@@ -106,7 +106,7 @@ function placePanelAtRightFront() {
 
   const targetPos = camPos
     .add(forward.scale(0.62))
-    .add(right.scale(0.28));
+    .add(left.scale(0.10));
 
   snapshotPanel.position.copyFrom(targetPos);
   snapshotPanel.lookAt(camPos);
