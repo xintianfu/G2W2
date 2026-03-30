@@ -20,6 +20,9 @@ let rightHandInput = null;
 
 const pinchThreshold = 0.04;
 const pinchCooldownMs = 1500;
+// 抓取感应距离：0.15米 (15厘米)
+const grabDistance = 0.15; 
+
 let lastPinchTime = 0;
 let wasPinchingRight = false;
 
@@ -36,7 +39,7 @@ function setStatus(text) {
 
 function nowMs() { return performance.now(); }
 
-// ---------- 截图与保存逻辑 ----------
+// ---------- 截图逻辑 (保持稳定) ----------
 function updateSnapshotFromCurrentVideoFrame() {
     if (!video.videoWidth || video.videoWidth < 100) return;
     const ctx = snapshotTextureCtx;
@@ -48,15 +51,11 @@ function updateSnapshotFromCurrentVideoFrame() {
     let drawWidth, drawHeight, offsetX, offsetY;
 
     if (videoAspect > texAspect) {
-        drawHeight = PANEL_TEX_HEIGHT;
-        drawWidth = drawHeight * videoAspect;
-        offsetX = (PANEL_TEX_WIDTH - drawWidth) / 2;
-        offsetY = 0;
+        drawHeight = PANEL_TEX_HEIGHT; drawWidth = drawHeight * videoAspect;
+        offsetX = (PANEL_TEX_WIDTH - drawWidth) / 2; offsetY = 0;
     } else {
-        drawWidth = PANEL_TEX_WIDTH;
-        drawHeight = drawWidth / videoAspect;
-        offsetX = 0;
-        offsetY = (PANEL_TEX_HEIGHT - drawHeight) / 2;
+        drawWidth = PANEL_TEX_WIDTH; drawHeight = drawWidth / videoAspect;
+        offsetX = 0; offsetY = (PANEL_TEX_HEIGHT - drawHeight) / 2;
     }
 
     ctx.save();
@@ -68,36 +67,31 @@ function updateSnapshotFromCurrentVideoFrame() {
 
     snapshotTexture.update();
     
-    // 截图后放置在相机前 0.6m
+    // 截图出现在眼前
     const cam = xrHelper.baseExperience.camera;
     const forward = cam.getForwardRay(1).direction;
-    snapshotPanel.position = cam.globalPosition.add(forward.scale(0.6));
+    snapshotPanel.position = cam.globalPosition.add(forward.scale(0.5));
     snapshotPanel.lookAt(cam.globalPosition, Math.PI); 
     snapshotPanel.setEnabled(true);
 
-    // 自动保存 (Quest 下载到 Downloads)
+    // 自动保存
     try {
-        const dataURL = snapshotTexture.getContext().canvas.toDataURL("image/jpeg", 0.9);
+        const dataURL = snapshotTexture.getContext().canvas.toDataURL("image/jpeg", 0.85);
         const link = document.createElement("a");
         link.href = dataURL;
-        link.download = `Snapshot_${Date.now()}.jpg`;
+        link.download = `QuestAR_${Date.now()}.jpg`;
         link.click();
-    } catch(e) { console.error("Save failed", e); }
+    } catch(e) {}
 }
 
-// ---------- 绘画逻辑 (仅限右手) ----------
+// ---------- 绘画过滤 (右手专用) ----------
 function setupPointerLogic() {
     scene.onPointerObservable.add((pointerInfo) => {
-        // 安全拦截：如果是左手触发的 Pointer 事件，直接无视
         if (xrHelper && xrHelper.baseExperience.state === BABYLON.WebXRState.IN_XR) {
             try {
-                // 如果 pointerSelection 还没初始化好，暂时跳过过滤
                 if (!xrHelper.pointerSelection) return;
-                
                 const context = xrHelper.pointerSelection.getPointerContext(pointerInfo.event.pointerId);
-                const inputSource = context ? context.inputSource : null;
-                
-                if (inputSource && inputSource.handedness === "left") return;
+                if (context?.inputSource?.handedness === "left") return; // 屏蔽左手绘画
             } catch (e) { return; }
         }
 
@@ -107,17 +101,12 @@ function setupPointerLogic() {
         const uv = isHit ? pickInfo.getTextureCoordinates() : null;
 
         if (type === BABYLON.PointerEventTypes.POINTERDOWN && uv) {
-            isDrawing = true;
-            lastDrawUV = uv;
-            drawAtUV(uv, true);
+            isDrawing = true; lastDrawUV = uv; drawAtUV(uv, true);
         } else if (type === BABYLON.PointerEventTypes.POINTERMOVE && isDrawing) {
-            if (uv) {
-                drawAtUV(uv, false);
-                lastDrawUV = uv;
-            } else { lastDrawUV = null; }
+            if (uv) { drawAtUV(uv, false); lastDrawUV = uv; } 
+            else { lastDrawUV = null; }
         } else if (type === BABYLON.PointerEventTypes.POINTERUP) {
-            isDrawing = false;
-            lastDrawUV = null;
+            isDrawing = false; lastDrawUV = null;
         }
     });
 }
@@ -127,9 +116,7 @@ function drawAtUV(uv, isFirstPoint) {
     ctx.setTransform(1, 0, 0, 1, 0, 0); 
     const x = (1 - uv.x) * PANEL_TEX_WIDTH;
     const y = (1 - uv.y) * PANEL_TEX_HEIGHT; 
-    ctx.strokeStyle = "#ff3b30";
-    ctx.lineWidth = 10;
-    ctx.lineCap = "round";
+    ctx.strokeStyle = "#ff3b30"; ctx.lineWidth = 10; ctx.lineCap = "round";
     if (isFirstPoint || !lastDrawUV) {
         ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2);
         ctx.fillStyle = "#ff3b30"; ctx.fill();
@@ -141,7 +128,7 @@ function drawAtUV(uv, isFirstPoint) {
     snapshotTexture.update();
 }
 
-// ---------- 核心循环：手势同步 ----------
+// ---------- 核心：手部追踪与物理抓取 ----------
 function getJointPos(hand, name) {
     if (!hand?.inputSource?.hand) return null;
     const joint = hand.inputSource.hand.get(name);
@@ -155,25 +142,36 @@ function getJointPos(hand, name) {
 function updateLoop() {
     if (!xrHelper || xrHelper.baseExperience.state !== BABYLON.WebXRState.IN_XR) return;
 
-    // 1. 左手搬运更新
-    if (isGrabbing && leftHandInput) {
-        const thumb = getJointPos(leftHandInput, "thumb-tip");
-        const index = getJointPos(leftHandInput, "index-finger-tip");
-        if (thumb && index) {
-            const pinchPos = BABYLON.Vector3.Center(thumb, index);
-            const dist = BABYLON.Vector3.Distance(thumb, index);
-            
-            if (dist > pinchThreshold + 0.02) {
+    // --- 1. 左手物理“吸附”搬运 ---
+    // 我们用掌心(wrist)或者中指根部来代表手的位置，比指尖更稳定
+    const leftPalm = getJointPos(leftHandInput, "wrist"); 
+    if (leftPalm && snapshotPanel.isEnabled()) {
+        const distance = BABYLON.Vector3.Distance(leftPalm, snapshotPanel.position);
+        
+        // 靠近就变色提示可抓取
+        if (distance < grabDistance) {
+            if (!isGrabbing) {
+                isGrabbing = true;
+                snapshotMaterial.emissiveColor = new BABYLON.Color3(0, 0.5, 1); // 变蓝
+                setStatus("已抓取面板 (靠近吸附)");
+            }
+        } 
+
+        if (isGrabbing) {
+            // 如果手离开太远 (0.3m)，自动释放
+            if (distance > 0.3) {
                 isGrabbing = false;
                 snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
+                setStatus("已释放面板");
             } else {
-                snapshotPanel.setAbsolutePosition(pinchPos);
+                // 面板平滑跟随手部位置
+                snapshotPanel.position = BABYLON.Vector3.Lerp(snapshotPanel.position, leftPalm, 0.2);
                 snapshotPanel.lookAt(xrHelper.baseExperience.camera.globalPosition, Math.PI);
             }
         }
     }
 
-    // 2. 右手 Pinch 截图检测
+    // --- 2. 右手 Pinch 截图 ---
     const rThumb = getJointPos(rightHandInput, "thumb-tip");
     const rIndex = getJointPos(rightHandInput, "index-finger-tip");
     const isPinchingRight = (rThumb && rIndex) ? BABYLON.Vector3.Distance(rThumb, rIndex) < pinchThreshold : false;
@@ -182,66 +180,34 @@ function updateLoop() {
         if (nowMs() - lastPinchTime > pinchCooldownMs) {
             lastPinchTime = nowMs();
             updateSnapshotFromCurrentVideoFrame();
+            setStatus("快照已生成");
         }
     }
     wasPinchingRight = isPinchingRight;
 }
 
-// ---------- XR 启动流程 (异步解耦修复加载问题) ----------
+// ---------- 初始化流程 ----------
 async function startCamera() {
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({ 
-            video: { facingMode: "environment", width: 1280, height: 720 },
-            audio: false 
-        });
-        video.srcObject = stream;
-        await video.play();
-        setStatus("摄像头已准备就绪");
-    } catch (e) { setStatus("摄像头开启失败，请检查 HTTPS 环境"); }
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    video.srcObject = stream;
+    await video.play();
 }
 
 async function initXR() {
-    try {
-        // 先创建按钮，防止由于插件报错导致按钮不出
-        xrHelper = await scene.createDefaultXRExperienceAsync({
-            uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
-        });
+    xrHelper = await scene.createDefaultXRExperienceAsync({
+        uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
+    });
 
-        // 状态监听：进入 AR 后再加载重度插件
-        xrHelper.baseExperience.onStateChangedObservable.add((state) => {
-            if (state === BABYLON.WebXRState.IN_XR) {
-                setStatus("已进入 AR，激活手势中...");
-                activateHandFeatures();
-            }
-        });
+    xrHelper.baseExperience.onStateChangedObservable.add((state) => {
+        if (state === BABYLON.WebXRState.IN_XR) {
+            xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", { xrInput: xrHelper.input });
+        }
+    });
 
-        setStatus("XR Ready. 请点击右下角 AR 按钮");
-    } catch (e) { setStatus("XR 启动报错: " + e.message); }
-}
-
-async function activateHandFeatures() {
-    try {
-        const fm = xrHelper.baseExperience.featuresManager;
-        fm.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", { xrInput: xrHelper.input });
-
-        xrHelper.input.onControllerAddedObservable.add((input) => {
-            const side = input.inputSource.handedness;
-            if (side === "left") {
-                leftHandInput = input;
-                // 左手捏合命中判定
-                input.onSelectTriggeredObservable.add(() => {
-                    const pick = scene.pickWithRay(input.getWorldPointerRay());
-                    if (pick.hit && pick.pickedMesh === snapshotPanel) {
-                        isGrabbing = true;
-                        snapshotMaterial.emissiveColor = new BABYLON.Color3(0.5, 0.8, 1);
-                    }
-                });
-            } else if (side === "right") {
-                rightHandInput = input;
-            }
-        });
-        setStatus("手势功能就绪");
-    } catch(e) { console.error("Feature fail", e); }
+    xrHelper.input.onControllerAddedObservable.add((input) => {
+        if (input.inputSource.handedness === "left") leftHandInput = input;
+        else rightHandInput = input;
+    });
 }
 
 async function bootstrap() {
@@ -262,9 +228,7 @@ async function bootstrap() {
     snapshotPanel.setEnabled(false);
 
     setupPointerLogic();
-    
-    // 并行初始化
-    startCamera();
+    await startCamera();
     await initXR();
 
     engine.runRenderLoop(() => {
