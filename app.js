@@ -53,7 +53,7 @@ function takeSnapshot() {
     // 我们先平移再缩放，实现水平镜像
     ctx.save();
     ctx.translate(PANEL_TEX_SIZE, 0);
-    ctx.scale(1, 1); 
+    ctx.scale(-1, 1); 
     
     // 3. 绘制当前视频帧 (实时抓取 video 元素内容)
     ctx.drawImage(video, 0, 0, PANEL_TEX_SIZE, PANEL_TEX_SIZE);
@@ -108,7 +108,8 @@ function updateLoop() {
                     const moveVector = currentPinchPos.subtract(lastLeftHandPos);
                     
                     // 【左右位移修正】将 X 轴取反
-                    moveVector.x = moveVector.x; 
+                    moveVector.x = -moveVector.x; 
+                    moveVector.z = -moveVector.z
                     
                     // 应用位移
                     snapshotPanel.position.addInPlace(moveVector);
