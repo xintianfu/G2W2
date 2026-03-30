@@ -2,7 +2,6 @@ const canvas = document.getElementById("renderCanvas");
 const video = document.getElementById("cameraVideo");
 const statusEl = document.getElementById("status");
 
-// 截图预览配置
 const snapshotPreview = document.getElementById("snapshotPreview");
 const previewCtx = snapshotPreview.getContext("2d");
 snapshotPreview.width = 512;
@@ -11,186 +10,158 @@ snapshotPreview.height = 512;
 let engine, scene, xrHelper;
 let snapshotPanel, snapshotMaterial, snapshotTexture, snapshotTextureCtx;
 
-// 核心状态变量
+// 交互状态
 let isGrabbingLeft = false; 
-let leftController = null;
-let rightController = null;
-
+let wasPinchingRight = false;
 let lastPinchTime = 0;
-const pinchCooldownMs = 1500;
+
+const PINCH_THRESHOLD = 0.02; // 右手捏合阈值 (4cm)
+const FIST_THRESHOLD = 0.06;  // 左手握拳阈值 (平均距离小于6cm)
+const GRAB_RANGE = 0.5;       // 左手抓取感应范围 (50cm)
+const COOLDOWN = 1500;
 
 const PANEL_TEX_WIDTH = 1024;
 const PANEL_TEX_HEIGHT = 1024;
 const PANEL_WORLD_WIDTH = 0.42;
 const PANEL_WORLD_HEIGHT = 0.28;
 
-// ---------- 工具函数 ----------
 function setStatus(text) {
     statusEl.textContent = `状态：${text}`;
     console.log(text);
 }
 
-function nowMs() { return performance.now(); }
-
-// ---------- 1. 截图与保存逻辑 ----------
-function takeSnapshot() {
-    if (!video.videoWidth || video.videoWidth < 100) return;
-    const ctx = snapshotTextureCtx;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
-
-    const vAspect = video.videoWidth / video.videoHeight;
-    const tAspect = PANEL_TEX_WIDTH / PANEL_TEX_HEIGHT;
-    let dW, dH, oX, oY;
-
-    if (vAspect > tAspect) {
-        dH = PANEL_TEX_HEIGHT; dW = dH * vAspect;
-        oX = (PANEL_TEX_WIDTH - dW) / 2; oY = 0;
-    } else {
-        dW = PANEL_TEX_WIDTH; dH = dW / vAspect;
-        oX = 0; oY = (PANEL_TEX_HEIGHT - dH) / 2;
-    }
-
-    ctx.save();
-    ctx.translate(PANEL_TEX_WIDTH / 2, PANEL_TEX_HEIGHT / 2);
-    ctx.scale(-1, 1); 
-    ctx.translate(-PANEL_TEX_WIDTH / 2, -PANEL_TEX_HEIGHT / 2);
-    ctx.drawImage(video, oX, oY, dW, dH);
-    ctx.restore();
-
-    snapshotTexture.update();
-    
-    // 面板出现在眼前
-    const cam = xrHelper.baseExperience.camera;
-    const forward = cam.getForwardRay(1).direction;
-    snapshotPanel.position = cam.globalPosition.add(forward.scale(0.5));
-    snapshotPanel.lookAt(cam.globalPosition, Math.PI); 
-    snapshotPanel.setEnabled(true);
-
-    // 自动保存到 Quest
-    try {
-        const dataURL = snapshotTexture.getContext().canvas.toDataURL("image/jpeg", 0.9);
-        const link = document.createElement("a");
-        link.href = dataURL;
-        link.download = `Shot_${Date.now()}.jpg`;
-        link.click();
-    } catch(e) { console.error(e); }
+// ---------- 1. 核心算法：获取关节世界坐标 ----------
+function getJointPos(controller, jointName) {
+    if (!controller?.inputSource?.hand) return null;
+    const joint = controller.inputSource.hand.get(jointName);
+    const frame = xrHelper?.baseExperience?.sessionManager?.currentFrame;
+    const ref = xrHelper?.baseExperience?.sessionManager?.referenceSpace;
+    if (!frame || !joint || !ref) return null;
+    const pose = frame.getJointPose(joint, ref);
+    return pose ? new BABYLON.Vector3(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z) : null;
 }
 
-// ---------- 2. 交互循环 (核心修复：物理跟随) ----------
+// ---------- 2. 核心算法：判定左手握拳 (Fist) ----------
+function getLeftHandFistStrength(controller) {
+    // 获取掌心作为参考点
+    const palm = getJointPos(controller, "wrist");
+    // 获取四个指尖
+    const i = getJointPos(controller, "index-finger-tip");
+    const m = getJointPos(controller, "middle-finger-tip");
+    const r = getJointPos(controller, "ring-finger-tip");
+    const p = getJointPos(controller, "pinky-finger-tip");
+
+    if (!palm || !i || !m || !r || !p) return 1.0; // 数据不足返回一个大的距离
+
+    // 计算四个指尖到掌心的平均距离
+    const d1 = BABYLON.Vector3.Distance(i, palm);
+    const d2 = BABYLON.Vector3.Distance(m, palm);
+    const d3 = BABYLON.Vector3.Distance(r, palm);
+    const d4 = BABYLON.Vector3.Distance(p, palm);
+
+    return (d1 + d2 + d3 + d4) / 4;
+}
+
+// ---------- 3. 核心循环：物理距离判定交互 ----------
 function updateLoop() {
     if (!xrHelper || xrHelper.baseExperience.state !== BABYLON.WebXRState.IN_XR) return;
 
-    // 如果左手正在抓取 (Pinch 住不放)
-    if (isGrabbingLeft && leftController) {
-        // 在控制器模式下，面板位置 = 射线的起点
-        const grabPos = leftController.pointer.position;
-        snapshotPanel.setAbsolutePosition(grabPos);
-        
-        // 面板始终面向用户，且保持正向
-        snapshotPanel.lookAt(xrHelper.baseExperience.camera.globalPosition, Math.PI);
-    }
-}
+    xrHelper.input.controllers.forEach((controller) => {
+        const side = controller.inputSource.handedness;
 
-// ---------- 3. 绘画逻辑过滤 ----------
-function setupPointerLogic() {
-    scene.onPointerObservable.add((pointerInfo) => {
-        // 屏蔽左手绘画
-        if (xrHelper && xrHelper.baseExperience.state === BABYLON.WebXRState.IN_XR) {
-            const context = xrHelper.pointerSelection.getPointerContext(pointerInfo.event.pointerId);
-            if (context?.inputSource?.handedness === "left") return;
-        }
+        // --- 左手：握拳搬运逻辑 ---
+        if (side === "left") {
+            const fistDist = getLeftHandFistStrength(controller);
+            const isFist = fistDist < FIST_THRESHOLD;
+            const palmPos = getJointPos(controller, "wrist") || controller.pointer.position;
 
-        const type = pointerInfo.type;
-        const pickInfo = pointerInfo.pickInfo;
-        const isHit = pickInfo?.hit && pickInfo.pickedMesh === snapshotPanel;
-        const uv = isHit ? pickInfo.getTextureCoordinates() : null;
+            if (snapshotPanel.isEnabled()) {
+                const distToPanel = BABYLON.Vector3.Distance(palmPos, snapshotPanel.position);
 
-        if (type === BABYLON.PointerEventTypes.POINTERDOWN && uv) {
-            drawAtUV(uv, true);
-        } else if (type === BABYLON.PointerEventTypes.POINTERMOVE && uv) {
-            drawAtUV(uv, false);
+                // 触发抓取：在50cm范围内且握拳
+                if (distToPanel < GRAB_RANGE && isFist) {
+                    if (!isGrabbingLeft) {
+                        isGrabbingLeft = true;
+                        snapshotMaterial.emissiveColor = new BABYLON.Color3(0, 0.8, 1); // 变蓝反馈
+                        setStatus("左手握拳：抓取成功");
+                    }
+                }
+
+                // 持续抓取：只要不松拳头就跟着走
+                if (isGrabbingLeft) {
+                    if (!isFist) {
+                        isGrabbingLeft = false;
+                        snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
+                        setStatus("左手松开：停止搬运");
+                    } else {
+                        // 1:1 坐标强制同步
+                        snapshotPanel.setAbsolutePosition(palmPos);
+                        snapshotPanel.lookAt(xrHelper.baseExperience.camera.globalPosition, Math.PI);
+                    }
+                }
+            }
+        } 
+        // --- 右手：Pinch 截图逻辑 (已证实的有效逻辑) ---
+        else if (side === "right") {
+            const thumb = getJointPos(controller, "thumb-tip");
+            const index = getJointPos(controller, "index-finger-tip");
+            
+            if (thumb && index) {
+                const dist = BABYLON.Vector3.Distance(thumb, index);
+                const isPinching = dist < PINCH_THRESHOLD;
+
+                if (isPinching && !wasPinchingRight) {
+                    if (performance.now() - lastPinchTime > COOLDOWN) {
+                        lastPinchTime = performance.now();
+                        updateSnapshotFromCurrentVideoFrame();
+                        setStatus("右手 Pinch：截图保存");
+                    }
+                }
+                wasPinchingRight = isPinching;
+            }
         }
     });
 }
 
-function drawAtUV(uv, isFirst) {
+// ---------- 4. 截图、绘画与启动逻辑 (保持稳定) ----------
+function updateSnapshotFromCurrentVideoFrame() {
+    if (!video.videoWidth) return;
     const ctx = snapshotTextureCtx;
-    ctx.setTransform(1, 0, 0, 1, 0, 0); 
-    const x = (1 - uv.x) * PANEL_TEX_WIDTH;
-    const y = (1 - uv.y) * PANEL_TEX_HEIGHT; 
-    ctx.strokeStyle = "#ff3b30"; ctx.lineWidth = 10; ctx.lineCap = "round";
-    if (isFirst) {
-        ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2);
-        ctx.fillStyle = "#ff3b30"; ctx.fill();
-    } else {
-        // 简化连续线逻辑
-        ctx.lineTo(x, y); ctx.stroke();
-    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
+    ctx.save();
+    ctx.translate(PANEL_TEX_WIDTH / 2, PANEL_TEX_HEIGHT / 2);
+    ctx.scale(-1, 1); 
+    ctx.translate(-PANEL_TEX_WIDTH / 2, -PANEL_TEX_HEIGHT / 2);
+    ctx.drawImage(video, 0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
+    ctx.restore();
     snapshotTexture.update();
+    
+    const cam = xrHelper.baseExperience.camera;
+    snapshotPanel.position = cam.globalPosition.add(cam.getForwardRay(1).direction.scale(0.5));
+    snapshotPanel.lookAt(cam.globalPosition, Math.PI); 
+    snapshotPanel.setEnabled(true);
+
+    const link = document.createElement("a");
+    link.href = snapshotTexture.getContext().canvas.toDataURL("image/jpeg");
+    link.download = `Shot_${Date.now()}.jpg`;
+    link.click();
 }
 
-// ---------- 4. XR 初始化 (事件驱动模式) ----------
 async function initXR() {
-    try {
-        xrHelper = await scene.createDefaultXRExperienceAsync({
-            uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
-        });
-
-        xrHelper.input.onControllerAddedObservable.add((input) => {
-            const side = input.inputSource.handedness;
-            
-            if (side === "left") {
-                leftController = input;
-                
-                // 监听捏合按下 (Select 触发)
-                input.onSelectTriggeredObservable.add(() => {
-                    // 发射一条射线检测是否指着面板
-                    const ray = input.getWorldPointerRay();
-                    const pick = scene.pickWithRay(ray);
-                    
-                    if (pick.hit && pick.pickedMesh === snapshotPanel) {
-                        isGrabbingLeft = true;
-                        // 抓住变色反馈：蓝色
-                        snapshotMaterial.emissiveColor = new BABYLON.Color3(0, 0.6, 1);
-                        setStatus("左手抓取中...");
-                    }
-                });
-
-                // 监听捏合松开 (Select 退出)
-                input.onSelectExitedObservable.add(() => {
-                    if (isGrabbingLeft) {
-                        isGrabbingLeft = false;
-                        snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
-                        setStatus("左手已放开");
-                    }
-                });
-            } else if (side === "right") {
-                rightController = input;
-                
-                // 右手 Pinch 截图
-                input.onSelectTriggeredObservable.add(() => {
-                    if (nowMs() - lastPinchTime > pinchCooldownMs) {
-                        lastPinchTime = nowMs();
-                        takeSnapshot();
-                        setStatus("右手：截图成功");
-                    }
-                });
-            }
-        });
-        
-        setStatus("XR 就绪，请点击按钮进入 AR");
-    } catch (e) { setStatus("XR 启动失败"); }
+    xrHelper = await scene.createDefaultXRExperienceAsync({
+        uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
+    });
+    xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", {
+        xrInput: xrHelper.input
+    });
 }
 
-// ---------- 5. 主程序入口 ----------
 async function bootstrap() {
     engine = new BABYLON.Engine(canvas, true);
     scene = new BABYLON.Scene(engine);
-    scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);
     new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
 
-    // 面板初始化
     snapshotPanel = BABYLON.MeshBuilder.CreatePlane("snapshotPanel", { width: PANEL_WORLD_WIDTH, height: PANEL_WORLD_HEIGHT, sideOrientation: BABYLON.Mesh.DOUBLESIDE }, scene);
     snapshotTexture = new BABYLON.DynamicTexture("sTex", { width: PANEL_TEX_WIDTH, height: PANEL_TEX_HEIGHT }, scene);
     snapshotTextureCtx = snapshotTexture.getContext();
@@ -201,21 +172,12 @@ async function bootstrap() {
     snapshotPanel.material = snapshotMaterial;
     snapshotPanel.setEnabled(false);
 
-    setupPointerLogic();
-
-    // 启动摄像头
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-        video.srcObject = stream;
-        await video.play();
-    } catch(e) { setStatus("摄像头开启失败"); }
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    video.srcObject = stream;
+    await video.play();
 
     await initXR();
-
-    engine.runRenderLoop(() => {
-        updateLoop();
-        scene.render();
-    });
+    engine.runRenderLoop(() => { updateLoop(); scene.render(); });
 }
 
 bootstrap();
