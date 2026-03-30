@@ -15,8 +15,8 @@ let isDrawing = false;
 let isGrabbingLeft = false; // 左手是否正在抓取
 let lastDrawUV = null;
 
-const pinchThreshold = 0.04;    // 捏合判定距离 (4厘米)
-const grabDistance = 0.35;      // 抓取感应范围 (35厘米)
+const pinchThreshold = 0.02;    // 捏合判定距离 (2厘米)
+const grabDistance = 0.5;      // 抓取感应范围 (50厘米)
 const pinchCooldownMs = 1500;   // 截图冷却
 
 let lastPinchTime = 0;
@@ -79,7 +79,7 @@ function drawAtUV(uv, isFirstPoint) {
     snapshotTexture.update();
 }
 
-// ---------- 2. 截图逻辑 ----------
+// ---------- 2. 右手截图逻辑 ----------
 function updateSnapshotFromCurrentVideoFrame() {
     if (!video.videoWidth || video.videoWidth < 100) return;
     const ctx = snapshotTextureCtx;
@@ -131,45 +131,21 @@ function getJointPosFromInput(input, name) {
 function updateLoop() {
     if (!xrHelper || xrHelper.baseExperience.state !== BABYLON.WebXRState.IN_XR) return;
 
-    // 每一帧都扫描控制器
+    // 1. 搬运逻辑：如果正在抓取，强行让面板坐标同步到左手射线的起点位置
+    if (isGrabbingLeft && leftHandInput) {
+        // 使用射线发射点（通常是食指根部或手掌）作为同步点
+        const pointerPos = leftHandInput.pointer.position;
+        snapshotPanel.setAbsolutePosition(pointerPos);
+        snapshotPanel.lookAt(xrHelper.baseExperience.camera.globalPosition, Math.PI);
+    }
+
+    // 2. 右手截图逻辑 (保留你觉得好用的物理距离判定)
     xrHelper.input.controllers.forEach((controller) => {
-        const side = controller.inputSource.handedness;
-        const thumb = getJointPosFromInput(controller, "thumb-tip");
-        const index = getJointPosFromInput(controller, "index-finger-tip");
-        
-        if (!thumb || !index) return;
+        if (controller.inputSource.handedness === "right") {
+            const thumb = getJointPosFromInput(controller, "thumb-tip");
+            const index = getJointPosFromInput(controller, "index-finger-tip");
+            const isPinching = (thumb && index) ? BABYLON.Vector3.Distance(thumb, index) < pinchThreshold : false;
 
-        const dist = BABYLON.Vector3.Distance(thumb, index);
-        const isPinching = dist < pinchThreshold;
-        const pinchPos = BABYLON.Vector3.Center(thumb, index);
-
-        // --- 左手：控制搬运 (逻辑与右手完全一致，仅功能不同) ---
-        if (side === "left") {
-            if (isPinching && snapshotPanel.isEnabled()) {
-                // 如果捏合时离面板够近，或者已经在抓取中
-                const distToPanel = BABYLON.Vector3.Distance(pinchPos, snapshotPanel.position);
-                
-                if (isGrabbingLeft || distToPanel < grabDistance) {
-                    if (!isGrabbingLeft) {
-                        isGrabbingLeft = true;
-                        snapshotMaterial.emissiveColor = new BABYLON.Color3(0, 0.7, 1); // 变蓝反馈
-                        setStatus("左手已抓住面板");
-                    }
-                    // 执行跟随移动 (1:1 跟随)
-                    snapshotPanel.setAbsolutePosition(pinchPos);
-                    snapshotPanel.lookAt(xrHelper.baseExperience.camera.globalPosition, Math.PI);
-                }
-            } else {
-                // 松手
-                if (isGrabbingLeft) {
-                    isGrabbingLeft = false;
-                    snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
-                    setStatus("左手已松开");
-                }
-            }
-        } 
-        // --- 右手：控制截图 ---
-        else if (side === "right") {
             if (isPinching && !wasPinchingRight) {
                 if (nowMs() - lastPinchTime > pinchCooldownMs) {
                     lastPinchTime = nowMs();
@@ -193,10 +169,40 @@ async function initXR() {
     xrHelper = await scene.createDefaultXRExperienceAsync({
         uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
     });
-    
+
     xrHelper.baseExperience.onStateChangedObservable.add((state) => {
         if (state === BABYLON.WebXRState.IN_XR) {
             xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", { xrInput: xrHelper.input });
+        }
+    });
+
+    xrHelper.input.onControllerAddedObservable.add((input) => {
+        const side = input.inputSource.handedness;
+        
+        if (side === "left") {
+            leftHandInput = input;
+            
+            // --- 关键修改：直接利用系统的“选中并捏合”事件 ---
+            // 当射线圆点变蓝并捏合时，触发这个
+            input.onSelectTriggeredObservable.add(() => {
+                const pick = scene.pickWithRay(input.getWorldPointerRay());
+                if (pick.hit && pick.pickedMesh === snapshotPanel) {
+                    isGrabbingLeft = true;
+                    snapshotMaterial.emissiveColor = new BABYLON.Color3(0, 0.7, 1); // 变蓝反馈
+                    setStatus("左手已锁定搬运");
+                }
+            });
+
+            // 当松开 Pinch 时，释放搬运
+            input.onSelectExitedObservable.add(() => {
+                if (isGrabbingLeft) {
+                    isGrabbingLeft = false;
+                    snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
+                    setStatus("左手已松开");
+                }
+            });
+        } else if (side === "right") {
+            rightHandInput = input;
         }
     });
 }
