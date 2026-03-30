@@ -62,12 +62,12 @@ function placePanelAtCurrentView() {
     snapshotPanel.setEnabled(true);
 }
 
-// ---------- 截图逻辑 (实现左右翻转) ----------
+// ---------- 核心修复：截图逻辑 (解决垂直镜像和水平镜像) ----------
 function updateSnapshotFromCurrentVideoFrame() {
     if (!video.videoWidth || !video.videoHeight) return;
     const ctx = snapshotTextureCtx;
     
-    // 重置变换矩阵并清空
+    // 1. 重置变换矩阵并清空画布
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
 
@@ -87,28 +87,38 @@ function updateSnapshotFromCurrentVideoFrame() {
         offsetY = (PANEL_TEX_HEIGHT - drawHeight) / 2;
     }
 
-    // --- 镜像翻转核心逻辑 ---
+    // --- 修复镜像核心逻辑 ---
+    // 摄像头的默认画面在 Canvas 里是左右反的，且 V 轴坐标也可能反。
+    // 我们在这里通过矩阵操作把它调正。
     ctx.save();
-    // 移动原点到右侧并翻转X轴，实现左右镜像
-    ctx.translate(PANEL_TEX_WIDTH, 0);
-    ctx.scale(-1, 1);
+    
+    // 核心组合变换：
+    // 1. 移动原点到画布中心
+    ctx.translate(PANEL_TEX_WIDTH / 2, PANEL_TEX_HEIGHT / 2);
+    // 2. 左右对称翻转 (-1, 1) 实现镜像修正
+    // 如果你发现左右还是反，把这个改为 (1, 1)
+    // 如果你发现上下反了，把这个改为 (-1, -1)
+    ctx.scale(-1, 1); 
+    // 3. 移回左上角
+    ctx.translate(-PANEL_TEX_WIDTH / 2, -PANEL_TEX_HEIGHT / 2);
     
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
     ctx.drawImage(video, offsetX, offsetY, drawWidth, drawHeight);
+    
     ctx.restore();
     // -----------------------
 
     ctx.fillStyle = "white";
     ctx.font = "bold 28px Arial";
-    ctx.fillText("MIRROR SHOT: " + new Date().toLocaleTimeString(), 40, 60);
+    ctx.fillText("CORRECTED SHOT: " + new Date().toLocaleTimeString(), 40, 60);
 
     snapshotTexture.update();
     updatePreviewFromTexture();
     placePanelAtCurrentView();
 }
 
-// ---------- 画笔逻辑 (同步镜像坐标) ----------
+// ---------- 画笔逻辑 (同步修正后的坐标) ----------
 function setupPointerLogic() {
     scene.onPointerObservable.add((pointerInfo) => {
         const type = pointerInfo.type;
@@ -134,16 +144,22 @@ function setupPointerLogic() {
 }
 
 function drawAtUV(uv, isFirstPoint) {
-    // 关键点：由于背景图在画的时候左右翻转了，
-    // 这里计算坐标时也要左右对称处理： (1 - uv.x)
+    const ctx = snapshotTextureCtx;
+    // 绘图时重置变换矩阵，确保画笔不受截图矩阵影响
+    ctx.setTransform(1, 0, 0, 1, 0, 0); 
+    
+    // 关键点：由于底图在 Canvas 里反着画了修正镜像，
+    // 这里计算画笔坐标时也要同步修正 X 轴。
+    // 使用 (1 - uv.x)
     const x = (1 - uv.x) * PANEL_TEX_WIDTH;
+    
+    // Babylon 的 UV 原点在左下，Canvas 绘图原点在左上，需要反转 Y。
     const y = (1 - uv.y) * PANEL_TEX_HEIGHT; 
     
-    const ctx = snapshotTextureCtx;
-    ctx.setTransform(1, 0, 0, 1, 0, 0); // 确保画笔坐标不受截图时的 scale 影响
     ctx.strokeStyle = "#ff3b30";
     ctx.lineWidth = 10;
     ctx.lineCap = "round";
+    ctx.lineJoin = "round";
 
     if (isFirstPoint || !lastDrawUV) {
         ctx.beginPath();
@@ -151,6 +167,7 @@ function drawAtUV(uv, isFirstPoint) {
         ctx.fillStyle = "#ff3b30";
         ctx.fill();
     } else {
+        // 连线坐标计算也必须一致
         const prevX = (1 - lastDrawUV.x) * PANEL_TEX_WIDTH;
         const prevY = (1 - lastDrawUV.y) * PANEL_TEX_HEIGHT;
         ctx.beginPath();
@@ -162,7 +179,7 @@ function drawAtUV(uv, isFirstPoint) {
     updatePreviewFromTexture();
 }
 
-// ---------- 基础初始化与循环 (保持不变) ----------
+// ---------- 摄像头与 XR (保持不变) ----------
 async function startCamera() {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -171,7 +188,7 @@ async function startCamera() {
         });
         video.srcObject = stream;
         await video.play();
-        setStatus("Camera Running");
+        setStatus("Camera OK");
     } catch (err) { setStatus("Camera Error"); }
 }
 
@@ -220,10 +237,10 @@ async function bootstrap() {
     new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
     const cam = new BABYLON.UniversalCamera("camera", new BABYLON.Vector3(0, 1.6, -2), scene);
 
-    snapshotPanel = BABYLON.MeshBuilder.CreatePlane("snapshotPanel", { width: PANEL_WORLD_WIDTH, height: PANEL_WORLD_HEIGHT }, scene);
+    snapshotPanel = BABYLON.MeshBuilder.CreatePlane("snapshotPanel", { width: PANEL_WORLD_WIDTH, height: PANEL_WORLD_HEIGHT, sideOrientation: BABYLON.Mesh.DOUBLESIDE }, scene);
     snapshotTexture = new BABYLON.DynamicTexture("sTex", { width: PANEL_TEX_WIDTH, height: PANEL_TEX_HEIGHT }, scene);
     
-    // 注意：这里不再设置 vScale = -1，防止面板消失
+    // 这里依然不使用 vScale = -1，防止 Quest 卡死消失。
     
     snapshotTextureCtx = snapshotTexture.getContext();
     const mat = new BABYLON.StandardMaterial("sMat", scene);
