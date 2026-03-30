@@ -73,7 +73,7 @@ function placePanelAtCurrentView() {
     if (!data || !snapshotPanel) return;
     const targetPos = data.camPos.add(data.forward.scale(0.6));
     snapshotPanel.position.copyFrom(targetPos);
-    snapshotPanel.lookAt(data.camPos, Math.PI); // 初始面向修正
+    snapshotPanel.lookAt(data.camPos, Math.PI); 
     snapshotPanel.setEnabled(true);
 }
 
@@ -113,18 +113,19 @@ function updateSnapshotFromCurrentVideoFrame() {
     saveSnapshotToLocal();
 }
 
-// ---------- 画笔逻辑 (修正：完全禁用左手画画) ----------
+// ---------- 画笔逻辑 (修正：安全判定左手) ----------
 function setupPointerLogic() {
     scene.onPointerObservable.add((pointerInfo) => {
-        // 1. 获取输入源 ID
-        const pointerId = pointerInfo.event.pointerId;
-        
-        // 2. 如果在 XR 中，根据 pointerId 找到对应的手
+        // 核心优化：增加多重检查，防止在 XR 初始化过程中卡死
         if (xrHelper && xrHelper.baseExperience.state === BABYLON.WebXRState.IN_XR) {
-            const inputSource = xrHelper.pointerSelection.getPointerContext(pointerId)?.inputSource;
-            // 重点修复：如果是左手触发的 Pointer 事件，直接无视，不许进入绘画流程
-            if (inputSource && inputSource.handedness === "left") {
-                return; 
+            try {
+                const pointerId = pointerInfo.event.pointerId;
+                const inputSource = xrHelper.pointerSelection.getPointerContext(pointerId)?.inputSource;
+                // 屏蔽左手绘画
+                if (inputSource && inputSource.handedness === "left") return;
+            } catch (e) {
+                // 如果 XR 输入还没准备好，静默跳过，不阻断主进程
+                return;
             }
         }
 
@@ -170,7 +171,7 @@ function drawAtUV(uv, isFirstPoint) {
 
 // ---------- 手势检测 ----------
 function getJointPos(hand, name) {
-    if (!hand?.inputSource?.hand) return null;
+    if (!hand || !hand.inputSource || !hand.inputSource.hand) return null;
     const joint = hand.inputSource.hand.get(name);
     const frame = xrHelper?.baseExperience?.sessionManager?.currentFrame;
     const ref = xrHelper?.baseExperience?.sessionManager?.referenceSpace;
@@ -191,19 +192,17 @@ function getPinchInfo(hand) {
 function updateLoop() {
     if (!xrHelper || xrHelper.baseExperience.state !== BABYLON.WebXRState.IN_XR) return;
 
-    // 1. 左手抓取移动 (修正反向移动)
+    // 1. 左手抓取
     const leftPinch = getPinchInfo(leftHandInput);
     if (isGrabbing) {
         if (!leftPinch.isPinching) {
             isGrabbing = false;
-            setStatus("Static");
         } else {
-            // 重点修复：直接设置绝对坐标，确保 1:1 跟随手部移动，不产生镜像反向
+            // 修正移动方向：直接世界坐标同步
             snapshotPanel.setAbsolutePosition(leftPinch.pos);
-            
             const camData = getCameraPoseVectors();
             if (camData) {
-                // 让面板面向用户，Math.PI 修正可能存在的 180 度翻转
+                // 修正旋转镜像反向感
                 snapshotPanel.lookAt(camData.camPos, Math.PI); 
             }
         }
@@ -211,7 +210,6 @@ function updateLoop() {
         const dist = BABYLON.Vector3.Distance(leftPinch.pos, snapshotPanel.position);
         if (dist < grabDistanceThreshold) {
             isGrabbing = true;
-            setStatus("Moving Panel...");
         }
     }
 
@@ -235,7 +233,8 @@ async function startCamera() {
         });
         video.srcObject = stream;
         await video.play();
-    } catch (e) { setStatus("Camera Error"); }
+        setStatus("Camera ready");
+    } catch (e) { setStatus("Camera error"); }
 }
 
 async function initXR() {
@@ -243,8 +242,8 @@ async function initXR() {
         xrHelper = await scene.createDefaultXRExperienceAsync({
             uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
         });
-        xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", { xrInput: xrHelper.input });
         
+        // 只有进入XR后，才会有输入源加入
         xrHelper.input.onControllerAddedObservable.add((input) => {
             if (input.inputSource.hand) {
                 const side = input.inputSource.handedness;
@@ -252,7 +251,12 @@ async function initXR() {
                 else if (side === "right") rightHandInput = input;
             }
         });
-    } catch (e) { setStatus("XR Error"); }
+
+        // 异步启用手势，不阻塞按钮生成
+        xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", { xrInput: xrHelper.input });
+        
+        setStatus("XR Ready. Click icon.");
+    } catch (e) { setStatus("XR error: " + e.message); }
 }
 
 async function bootstrap() {
@@ -273,7 +277,9 @@ async function bootstrap() {
     snapshotPanel.setEnabled(false);
 
     setupPointerLogic();
-    await startCamera();
+    
+    // 串行改并行启动，提升加载速度
+    startCamera();
     await initXR();
 
     engine.runRenderLoop(() => {
