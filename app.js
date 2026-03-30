@@ -17,7 +17,7 @@ let currentCameraStream = null;
 let leftHandInput = null;
 let rightHandInput = null;
 const pinchThreshold = 0.04;
-const pinchCooldownMs = 1000;
+const pinchCooldownMs = 1200; // 稍微增长冷却，防止连续保存
 let lastPinchTime = 0;
 let wasPinchingRight = false;
 
@@ -40,6 +40,28 @@ function updatePreviewFromTexture() {
     previewCtx.drawImage(snapshotTexture.getContext().canvas, 0, 0, 512, 512);
 }
 
+// 保存截图到设备本地
+function saveSnapshotToLocal() {
+    try {
+        const canvasToSave = snapshotTexture.getContext().canvas;
+        // 使用 JPEG 格式减小体积，防止 Quest 浏览器处理超大 Base64 时卡死
+        const dataURL = canvasToSave.toDataURL("image/jpeg", 0.9);
+        
+        const link = document.createElement("a");
+        link.href = dataURL;
+        link.download = `Quest_AR_Shot_${Date.now()}.jpg`;
+        
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        setStatus("Saved to Downloads!");
+    } catch (e) {
+        console.error("Save error:", e);
+        setStatus("Save Failed: Permissions?");
+    }
+}
+
 function getCameraPoseVectors() {
     let cam = (xrHelper?.baseExperience?.state === BABYLON.WebXRState.IN_XR) 
         ? xrHelper.baseExperience.camera 
@@ -56,31 +78,41 @@ function placePanelAtCurrentView() {
     const data = getCameraPoseVectors();
     if (!data || !snapshotPanel) return;
     const { camPos, forward, right } = data;
+    // 放在视野正前方 0.6m
     const targetPos = camPos.add(forward.scale(0.6)).add(right.scale(0.1));
     snapshotPanel.position.copyFrom(targetPos);
     snapshotPanel.lookAt(camPos);
     snapshotPanel.setEnabled(true);
 }
 
-// ---------- 截图逻辑 (去掉了反向的文字) ----------
+// ---------- 核心：修复条状问题的截图逻辑 ----------
 function updateSnapshotFromCurrentVideoFrame() {
-    if (!video.videoWidth || !video.videoHeight) return;
+    // 关键点：如果视频宽度太小，说明流未稳定，不执行绘制
+    if (!video.videoWidth || video.videoWidth < 100) {
+        setStatus("Camera stream initializing...");
+        return;
+    }
+
     const ctx = snapshotTextureCtx;
-    
-    // 重置并清空
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
 
-    const videoAspect = video.videoWidth / video.videoHeight;
+    // 严谨计算比例，防止条状拉伸
+    const vW = video.videoWidth;
+    const vH = video.videoHeight;
+    const videoAspect = vW / vH;
     const texAspect = PANEL_TEX_WIDTH / PANEL_TEX_HEIGHT;
+
     let drawWidth, drawHeight, offsetX, offsetY;
 
     if (videoAspect > texAspect) {
+        // 视频比画布更宽
         drawHeight = PANEL_TEX_HEIGHT;
         drawWidth = drawHeight * videoAspect;
         offsetX = (PANEL_TEX_WIDTH - drawWidth) / 2;
         offsetY = 0;
     } else {
+        // 视频比画布更高（或相等）
         drawWidth = PANEL_TEX_WIDTH;
         drawHeight = drawWidth / videoAspect;
         offsetX = 0;
@@ -88,21 +120,24 @@ function updateSnapshotFromCurrentVideoFrame() {
     }
 
     ctx.save();
-    // 矩阵变换实现左右镜像修正
+    // 镜像修正：中心翻转
     ctx.translate(PANEL_TEX_WIDTH / 2, PANEL_TEX_HEIGHT / 2);
     ctx.scale(-1, 1); 
     ctx.translate(-PANEL_TEX_WIDTH / 2, -PANEL_TEX_HEIGHT / 2);
     
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
+    
+    // 绘制当前相机帧
     ctx.drawImage(video, offsetX, offsetY, drawWidth, drawHeight);
     ctx.restore();
-
-    // --- 已移除文字绘制代码 ---
 
     snapshotTexture.update();
     updatePreviewFromTexture();
     placePanelAtCurrentView();
+
+    // 截图后自动下载到本地
+    saveSnapshotToLocal();
 }
 
 // ---------- 画笔逻辑 ----------
@@ -134,9 +169,7 @@ function drawAtUV(uv, isFirstPoint) {
     const ctx = snapshotTextureCtx;
     ctx.setTransform(1, 0, 0, 1, 0, 0); 
     
-    // 配合底图修正镜像，X坐标取反 (1 - uv.x)
     const x = (1 - uv.x) * PANEL_TEX_WIDTH;
-    // 反转 Y
     const y = (1 - uv.y) * PANEL_TEX_HEIGHT; 
     
     ctx.strokeStyle = "#ff3b30";
@@ -161,7 +194,7 @@ function drawAtUV(uv, isFirstPoint) {
     updatePreviewFromTexture();
 }
 
-// ---------- 摄像头与 XR (保持不变) ----------
+// ---------- 硬件启动 ----------
 async function startCamera() {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -170,15 +203,17 @@ async function startCamera() {
         });
         video.srcObject = stream;
         await video.play();
-        setStatus("Camera OK");
-    } catch (err) { setStatus("Camera Error"); }
+        setStatus("Camera ready");
+    } catch (err) { setStatus("Camera error: check permissions"); }
 }
 
 async function initXR() {
     xrHelper = await scene.createDefaultXRExperienceAsync({
         uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
     });
+    
     xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", { xrInput: xrHelper.input });
+    
     xrHelper.input.onControllerAddedObservable.add((input) => {
         if (input.inputSource.hand) {
             if (input.inputSource.handedness === "left") leftHandInput = input;
@@ -217,12 +252,11 @@ async function bootstrap() {
     scene = new BABYLON.Scene(engine);
     scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);
     new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
-    const cam = new BABYLON.UniversalCamera("camera", new BABYLON.Vector3(0, 1.6, -2), scene);
-
+    
     snapshotPanel = BABYLON.MeshBuilder.CreatePlane("snapshotPanel", { width: PANEL_WORLD_WIDTH, height: PANEL_WORLD_HEIGHT, sideOrientation: BABYLON.Mesh.DOUBLESIDE }, scene);
     snapshotTexture = new BABYLON.DynamicTexture("sTex", { width: PANEL_TEX_WIDTH, height: PANEL_TEX_HEIGHT }, scene);
-    
     snapshotTextureCtx = snapshotTexture.getContext();
+    
     const mat = new BABYLON.StandardMaterial("sMat", scene);
     mat.diffuseTexture = snapshotTexture;
     mat.emissiveColor = new BABYLON.Color3(1, 1, 1);
