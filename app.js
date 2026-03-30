@@ -309,7 +309,7 @@ async function bootstrap() {
   
   // --- 核心修复：解决镜像问题 ---
   // 将纹理在 V 轴（垂直方向）上翻转，使其与 Canvas 坐标系一致
-  snapshotTexture.vScale = -1; 
+  // snapshotTexture.vScale = -1; 
   // ------------------------------
 
   snapshotTextureCtx = snapshotTexture.getContext();
