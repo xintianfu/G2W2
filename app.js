@@ -20,7 +20,8 @@ let rightHandInput = null;
 
 const pinchThreshold = 0.04;
 const pinchCooldownMs = 1200;
-const grabDistanceThreshold = 0.4; 
+// 关键改进：增大抓取判定半径，防止捏不到
+const grabDistanceThreshold = 0.6; 
 
 let lastPinchTime = 0;
 let wasPinchingRight = false;
@@ -113,20 +114,16 @@ function updateSnapshotFromCurrentVideoFrame() {
     saveSnapshotToLocal();
 }
 
-// ---------- 画笔逻辑 (修正：安全判定左手) ----------
+// ---------- 画笔逻辑 (隔离左手) ----------
 function setupPointerLogic() {
     scene.onPointerObservable.add((pointerInfo) => {
-        // 核心优化：增加多重检查，防止在 XR 初始化过程中卡死
+        // XR 模式下屏蔽左手画画
         if (xrHelper && xrHelper.baseExperience.state === BABYLON.WebXRState.IN_XR) {
             try {
                 const pointerId = pointerInfo.event.pointerId;
                 const inputSource = xrHelper.pointerSelection.getPointerContext(pointerId)?.inputSource;
-                // 屏蔽左手绘画
                 if (inputSource && inputSource.handedness === "left") return;
-            } catch (e) {
-                // 如果 XR 输入还没准备好，静默跳过，不阻断主进程
-                return;
-            }
+            } catch (e) { return; }
         }
 
         const type = pointerInfo.type;
@@ -188,32 +185,36 @@ function getPinchInfo(hand) {
     return { isPinching: dist < pinchThreshold, pos: BABYLON.Vector3.Center(t, i) };
 }
 
-// ---------- 核心循环 ----------
+// ---------- 核心循环：左手移动 + 右手截图 ----------
 function updateLoop() {
     if (!xrHelper || xrHelper.baseExperience.state !== BABYLON.WebXRState.IN_XR) return;
 
-    // 1. 左手抓取
+    // 1. 左手抓取逻辑
     const leftPinch = getPinchInfo(leftHandInput);
     if (isGrabbing) {
         if (!leftPinch.isPinching) {
             isGrabbing = false;
+            // 抓取结束，恢复颜色
+            snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
+            setStatus("Ready");
         } else {
-            // 修正移动方向：直接世界坐标同步
+            // 抓取中：吸附位置并面向相机
             snapshotPanel.setAbsolutePosition(leftPinch.pos);
             const camData = getCameraPoseVectors();
-            if (camData) {
-                // 修正旋转镜像反向感
-                snapshotPanel.lookAt(camData.camPos, Math.PI); 
-            }
+            if (camData) snapshotPanel.lookAt(camData.camPos, Math.PI);
         }
     } else if (leftPinch.isPinching) {
+        // 判定：左手捏合点离面板中心是否足够近
         const dist = BABYLON.Vector3.Distance(leftPinch.pos, snapshotPanel.position);
         if (dist < grabDistanceThreshold) {
             isGrabbing = true;
+            // 抓取成功视觉反馈：变蓝光
+            snapshotMaterial.emissiveColor = new BABYLON.Color3(0.5, 0.7, 1);
+            setStatus("Grabbing...");
         }
     }
 
-    // 2. 右手截图
+    // 2. 右手截图逻辑
     const rightPinch = getPinchInfo(rightHandInput);
     if (rightPinch.isPinching && !wasPinchingRight) {
         if (nowMs() - lastPinchTime > pinchCooldownMs) {
@@ -233,8 +234,8 @@ async function startCamera() {
         });
         video.srcObject = stream;
         await video.play();
-        setStatus("Camera ready");
-    } catch (e) { setStatus("Camera error"); }
+        setStatus("Camera OK");
+    } catch (e) { setStatus("Camera Error"); }
 }
 
 async function initXR() {
@@ -243,7 +244,6 @@ async function initXR() {
             uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
         });
         
-        // 只有进入XR后，才会有输入源加入
         xrHelper.input.onControllerAddedObservable.add((input) => {
             if (input.inputSource.hand) {
                 const side = input.inputSource.handedness;
@@ -252,10 +252,8 @@ async function initXR() {
             }
         });
 
-        // 异步启用手势，不阻塞按钮生成
         xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", { xrInput: xrHelper.input });
-        
-        setStatus("XR Ready. Click icon.");
+        setStatus("XR Ready.");
     } catch (e) { setStatus("XR error: " + e.message); }
 }
 
@@ -269,16 +267,14 @@ async function bootstrap() {
     snapshotTexture = new BABYLON.DynamicTexture("sTex", { width: PANEL_TEX_WIDTH, height: PANEL_TEX_HEIGHT }, scene);
     snapshotTextureCtx = snapshotTexture.getContext();
     
-    const mat = new BABYLON.StandardMaterial("sMat", scene);
-    mat.diffuseTexture = snapshotTexture;
-    mat.emissiveColor = new BABYLON.Color3(1, 1, 1);
-    mat.disableLighting = true;
-    snapshotPanel.material = mat;
+    snapshotMaterial = new BABYLON.StandardMaterial("sMat", scene);
+    snapshotMaterial.diffuseTexture = snapshotTexture;
+    snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
+    snapshotMaterial.disableLighting = true;
+    snapshotPanel.material = snapshotMaterial;
     snapshotPanel.setEnabled(false);
 
     setupPointerLogic();
-    
-    // 串行改并行启动，提升加载速度
     startCamera();
     await initXR();
 
