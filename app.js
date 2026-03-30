@@ -15,7 +15,7 @@ let lastPinchTime = 0;
 let lastLeftHandPos = null; 
 
 // 判定阈值 (米)
-const PINCH_THRESHOLD = 0.04;  // 4cm
+const PINCH_THRESHOLD = 0.02;  // 2cm
 const COOLDOWN = 1500;         // 截图冷却
 
 const PANEL_TEX_SIZE = 1024;
