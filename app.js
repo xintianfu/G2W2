@@ -212,7 +212,9 @@ function updateLoop() {
     handleGrabbing();
 }
 
+// ---------- 修改后的抓取移动逻辑 ----------
 function handleGrabbing() {
+    // 获取两只手的握拳状态
     const leftFist = detectFist(leftHandInput);
     const rightFist = detectFist(rightHandInput);
 
@@ -220,22 +222,28 @@ function handleGrabbing() {
         // 正在抓取中
         const activeHand = currentGrabHand === "left" ? leftHandInput : rightHandInput;
         const stillFist = currentGrabHand === "left" ? leftFist : rightFist;
-        const wristPos = getJointPos(activeHand, "wrist");
+        
+        // 我们改用食指根部或手掌中心作为参考点，比手腕更稳
+        const grabPoint = getJointPos(activeHand, "middle-finger-metacarpal") || getJointPos(activeHand, "wrist");
 
         // 如果松开拳头或丢失追踪，停止抓取
-        if (!stillFist || !wristPos) {
+        if (!stillFist || !grabPoint) {
             isGrabbing = false;
             currentGrabHand = null;
             setStatus("Grab Released");
             return;
         }
 
-        // 面板跟随手腕移动
-        snapshotPanel.position.copyFrom(wristPos);
+        // 1. 直接同步位置 (这里绝对不会产生镜像反向)
+        snapshotPanel.position.copyFrom(grabPoint);
         
-        // 让面板始终朝向相机
+        // 2. 修正看向相机的逻辑
+        // 如果之前感觉左右反，是因为面板的正反面搞错了
         const data = getCameraPoseVectors();
-        if (data) snapshotPanel.lookAt(data.camPos);
+        if (data) {
+            // 使用 lookAt 的第二个参数来旋转 180 度，确保你看到的是正面
+            snapshotPanel.lookAt(data.camPos, Math.PI); 
+        }
 
     } else {
         // 检测起始抓取条件
@@ -251,9 +259,9 @@ function checkAndStartGrab(handInput, side) {
     const wristPos = getJointPos(handInput, "wrist");
     if (!wristPos || !snapshotPanel) return;
 
-    // 检查手部是否离面板足够近
     const dist = BABYLON.Vector3.Distance(wristPos, snapshotPanel.position);
-    if (dist < grabDistanceThreshold) {
+    // 增加一点判定范围，让抓取更容易
+    if (dist < 0.3) { 
         isGrabbing = true;
         currentGrabHand = side;
         setStatus(`Grabbing with ${side} hand`);
