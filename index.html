@@ -1,34 +1,37 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Quest AR Snapshot Panel</title>
-    <link rel="stylesheet" href="style.css">
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+  />
+  <title>Quest Snapshot Panel</title>
+  <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
-
-    <div id="status-container">
-        <h2>快照面板</h2>
-        <div id="status">状态：正在初始化引擎...</div>
-        <div class="hint">
-            <strong>操作指南：</strong><br>
-            • <b>右手捏合：</b> 新建快照 + 自动下载<br>
-            • <b>左手抓取：</b> 射线变蓝后捏合，可移动面板<br>
-            • <b>右手手指：</b> 靠近面板直接在表面绘图
-        </div>
+  <div id="hud">
+    <div class="hud-card">
+      <h1>Snapshot Panel</h1>
+      <p id="status">Status: loading...</p>
+      <p>
+        XR logic:
+        <br />
+        pinch = update snapshot
+        <br />
+        fist near panel = move panel
+        <br />
+        poke panel = toggle draw mode
+      </p>
     </div>
+  </div>
 
-    <video id="cameraVideo" autoplay muted playsinline></video>
+  <video id="cameraVideo" autoplay playsinline muted></video>
+  <canvas id="snapshotPreview"></canvas>
+  <canvas id="renderCanvas"></canvas>
 
-    <canvas id="snapshotPreview"></canvas>
-
-    <canvas id="renderCanvas"></canvas>
-
-    <script src="https://cdn.babylonjs.com/babylon.js"></script>
-    <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
-    <script src="https://code.jquery.com/pep/0.4.3/pep.min.js"></script>
-
-    <script src="app.js"></script>
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script src="https://cdn.babylonjs.com/gui/babylon.gui.min.js"></script>
+  <script src="./app.js"></script>
 </body>
 </html>
