@@ -1,3 +1,7 @@
+可以右手pinch 左手pinch移动，移动的方向有点奇怪
+
+
+
 const canvas = document.getElementById("renderCanvas");
 const video = document.getElementById("cameraVideo");
 const statusEl = document.getElementById("status");
@@ -9,11 +13,9 @@ let snapshotPanel, snapshotMaterial, snapshotTexture, snapshotTextureCtx;
 let isGrabbingLeft = false; 
 let wasPinchingRight = false;
 let lastPinchTime = 0;
-let isDrawingRight = false; 
-let lastDrawUV = null;
 
 // 配置参数
-const PINCH_THRESHOLD = 0.04; 
+const PINCH_THRESHOLD = 0.02; 
 const COOLDOWN = 1000; 
 const PANEL_TEX_SIZE = 1024;
 const PANEL_WORLD_WIDTH = 0.42;
@@ -24,114 +26,86 @@ function setStatus(text) {
 }
 
 /**
- * 【核心修正】坐标矫正函数
- * 解决 WebXR 镜像对称导致坐标点出现在身后或方向相反的问题
+ * 【核心修复】镜像坐标矫正函数
+ * 解决左手 Pinch 后面板对称飞到背后、左右反向的问题
  */
 function getCorrectedPoint(controller, jointName) {
     let rawPos = null;
+    
+    // 1. 尝试获取关节骨骼坐标
     if (controller?.inputSource?.hand) {
         const joint = controller.inputSource.hand.get(jointName);
         const frame = xrHelper?.baseExperience?.sessionManager?.currentFrame;
         const ref = xrHelper?.baseExperience?.sessionManager?.referenceSpace;
         if (frame && joint && ref) {
             const pose = frame.getJointPose(joint, ref);
-            if (pose) rawPos = new BABYLON.Vector3(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
+            if (pose) {
+                rawPos = new BABYLON.Vector3(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
+            }
         }
     }
-    if (!rawPos) rawPos = controller.pointer.position.clone();
+    
+    // 2. 如果没拿到骨骼，使用射线起点保底
+    if (!rawPos) {
+        rawPos = controller.pointer.position.clone();
+    }
 
-    // 关键：通过反转 X 和 Z 轴，把镜像到身后的坐标拉回到面前
-    return new BABYLON.Vector3(-rawPos.x, rawPos.y, -rawPos.z);
+    // 3. 【核心修正】如果当前是左手且出现了镜像对称
+    // 我们将 X (左右) 和 Z (前后) 坐标取反，强行把点从身后拉回身前
+    if (controller.inputSource.handedness === "left") {
+        return new BABYLON.Vector3(-rawPos.x, rawPos.y, -rawPos.z);
+    }
+    
+    return rawPos;
 }
 
 /**
- * 【动态截图】修正内容镜像并强制刷新
+ * 【核心修复】动态截图函数
+ * 解决内容不刷新、内容左右反转的问题
  */
 function takeSnapshot() {
-    if (!video.videoWidth || video.readyState < 2) return;
+    if (!video.videoWidth || video.readyState < 2) {
+        setStatus("等待摄像头流...");
+        return;
+    }
+
     const ctx = snapshotTextureCtx;
+    // 1. 强制重置绘图上下文，防止缓存
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, PANEL_TEX_SIZE, PANEL_TEX_SIZE);
     
-    // 修正内容左右反转，让快照里的文字是正的
+    // 2. 修正画面左右镜像：让文字和环境方位在面板上看起来是正的
     ctx.save();
     ctx.translate(PANEL_TEX_SIZE, 0);
     ctx.scale(-1, 1); 
+    
+    // 3. 抓取当前实时视频帧
     ctx.drawImage(video, 0, 0, PANEL_TEX_SIZE, PANEL_TEX_SIZE);
     ctx.restore();
     
+    // 4. 通知 Babylon 立即更新 GPU 纹理
     snapshotTexture.update();
     
+    // 5. 将面板放置在相机正前方 0.5 米
     const cam = xrHelper.baseExperience.camera;
     const forward = cam.getForwardRay(1).direction;
     snapshotPanel.position = cam.globalPosition.add(forward.scale(0.5));
     snapshotPanel.lookAt(cam.globalPosition, Math.PI); 
     snapshotPanel.setEnabled(true);
-    setStatus("快照更新成功");
+
+    setStatus("快照更新成功: " + new Date().toLocaleTimeString().split(' ')[0]);
 }
 
 /**
- * 【物理绘图】计算食指与面板的接触
- */
-function handleDrawing(fingerPos) {
-    // 将指尖世界坐标转为面板局部坐标
-    const invMat = snapshotPanel.getWorldMatrix().clone().invert();
-    const localPos = BABYLON.Vector3.TransformCoordinates(fingerPos, invMat);
-
-    // 判定：在面板平面范围内，且垂直距离小于 2 厘米
-    const inBounds = Math.abs(localPos.x) < 0.21 && Math.abs(localPos.y) < 0.14;
-    const isTouching = Math.abs(localPos.z) < 0.02;
-
-    if (inBounds && isTouching) {
-        // 计算 UV (0-1)
-        const uv = new BABYLON.Vector2(
-            (localPos.x + 0.21) / 0.42,
-            (localPos.y + 0.14) / 0.28
-        );
-        
-        drawOnPanel(uv, !isDrawingRight);
-        isDrawingRight = true;
-    } else {
-        isDrawingRight = false;
-        lastDrawUV = null;
-    }
-}
-
-function drawOnPanel(uv, isNewPath) {
-    const ctx = snapshotTextureCtx;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    
-    // 适配镜像后的纹理 X 轴
-    const x = (1 - uv.x) * PANEL_TEX_SIZE;
-    const y = (1 - uv.y) * PANEL_TEX_SIZE;
-
-    ctx.strokeStyle = "#ff3b30";
-    ctx.lineWidth = 10;
-    ctx.lineCap = "round";
-
-    if (isNewPath || !lastDrawUV) {
-        ctx.beginPath();
-        ctx.moveTo(x, y);
-    } else {
-        const lx = (1 - lastDrawUV.x) * PANEL_TEX_SIZE;
-        const ly = (1 - lastDrawUV.y) * PANEL_TEX_SIZE;
-        ctx.beginPath();
-        ctx.moveTo(lx, ly);
-        ctx.lineTo(x, y);
-        ctx.stroke();
-    }
-    lastDrawUV = uv;
-    snapshotTexture.update();
-}
-
-/**
- * 实时逻辑循环
+ * 实时交互循环
  */
 function updateLoop() {
     if (!xrHelper || xrHelper.baseExperience.state !== BABYLON.WebXRState.IN_XR) return;
 
     xrHelper.input.controllers.forEach((controller) => {
         const side = controller.inputSource.handedness;
+        
+        // 获取经过坐标矫正后的位置
         const thumb = getCorrectedPoint(controller, "thumb-tip");
         const index = getCorrectedPoint(controller, "index-finger-tip");
         
@@ -141,20 +115,26 @@ function updateLoop() {
         const isPinching = dist < PINCH_THRESHOLD;
         const pinchCenter = BABYLON.Vector3.Center(thumb, index);
 
+        // --- 左手：控制吸附搬运 ---
         if (side === "left") {
-            // 左手逻辑：吸附搬运
             if (isPinching && snapshotPanel.isEnabled()) {
-                isGrabbingLeft = true;
-                snapshotMaterial.emissiveColor = new BABYLON.Color3(0, 0.7, 1);
+                if (!isGrabbingLeft) {
+                    isGrabbingLeft = true;
+                    snapshotMaterial.emissiveColor = new BABYLON.Color3(0, 0.7, 1);
+                }
+                
+                // 直接同步到矫正后的坐标，解决“瞬移到身后”
                 snapshotPanel.setAbsolutePosition(pinchCenter);
                 snapshotPanel.lookAt(xrHelper.baseExperience.camera.globalPosition, Math.PI);
             } else {
-                isGrabbingLeft = false;
-                snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
+                if (isGrabbingLeft) {
+                    isGrabbingLeft = false;
+                    snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
+                }
             }
         } 
+        // --- 右手：控制截图 ---
         else if (side === "right") {
-            // 右手逻辑 A：截图触发
             if (isPinching && !wasPinchingRight) {
                 if (performance.now() - lastPinchTime > COOLDOWN) {
                     lastPinchTime = performance.now();
@@ -162,29 +142,40 @@ function updateLoop() {
                 }
             }
             wasPinchingRight = isPinching;
-
-            // 右手逻辑 B：物理接触绘图
-            if (snapshotPanel.isEnabled()) {
-                handleDrawing(index); 
-            }
         }
     });
 }
 
+/**
+ * 初始化 WebXR
+ */
 async function initXR() {
-    xrHelper = await scene.createDefaultXRExperienceAsync({
-        uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
-    });
-    xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", {
-        xrInput: xrHelper.input
-    });
+    try {
+        xrHelper = await scene.createDefaultXRExperienceAsync({
+            uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
+        });
+        
+        // 显式开启手势特征
+        xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", {
+            xrInput: xrHelper.input
+        });
+        
+        setStatus("XR 就绪，请进入 AR");
+    } catch (e) {
+        setStatus("XR 初始化失败");
+    }
 }
 
+/**
+ * 程序启动入口
+ */
 async function bootstrap() {
     engine = new BABYLON.Engine(canvas, true);
     scene = new BABYLON.Scene(engine);
+    scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);
     new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
 
+    // 面板与材质初始化
     snapshotPanel = BABYLON.MeshBuilder.CreatePlane("sPanel", { 
         width: PANEL_WORLD_WIDTH, height: PANEL_WORLD_HEIGHT, sideOrientation: BABYLON.Mesh.DOUBLESIDE 
     }, scene);
@@ -199,18 +190,23 @@ async function bootstrap() {
     snapshotPanel.material = snapshotMaterial;
     snapshotPanel.setEnabled(false);
 
+    // 启动实时视频流
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ 
             video: { facingMode: "environment", width: 1280, height: 720 } 
         });
         video.srcObject = stream;
         await video.play();
-    } catch (e) { setStatus("摄像头未连接"); }
+        setStatus("视频流已连接");
+    } catch (e) {
+        setStatus("请开启摄像头权限并使用 HTTPS");
+    }
 
     await initXR();
-    engine.runRenderLoop(() => { 
-        updateLoop(); 
-        scene.render(); 
+    
+    engine.runRenderLoop(() => {
+        updateLoop();
+        scene.render();
     });
 }
 
