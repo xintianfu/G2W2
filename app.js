@@ -53,7 +53,7 @@ function takeSnapshot() {
     // 我们先平移再缩放，实现水平镜像
     ctx.save();
     ctx.translate(PANEL_TEX_SIZE, 0);
-    ctx.scale(-1, 1); 
+    ctx.scale(1, 1); 
     
     // 3. 绘制当前视频帧 (实时抓取 video 元素内容)
     ctx.drawImage(video, 0, 0, PANEL_TEX_SIZE, PANEL_TEX_SIZE);
@@ -72,12 +72,12 @@ function takeSnapshot() {
     setStatus("快照已更新：" + new Date().toLocaleTimeString());
 
     // 触发保存到本地 (Quest 浏览器会提示下载)
-    try {
-        const link = document.createElement("a");
-        link.href = snapshotTexture.getContext().canvas.toDataURL("image/jpeg", 0.85);
-        link.download = `Shot_${Date.now()}.jpg`;
-        link.click();
-    } catch(e) {}
+    // try {
+    //     const link = document.createElement("a");
+    //     link.href = snapshotTexture.getContext().canvas.toDataURL("image/jpeg", 0.85);
+    //     link.download = `Shot_${Date.now()}.jpg`;
+    //     link.click();
+    // } catch(e) {}
 }
 
 // 渲染循环：处理位移与手势判定
@@ -108,7 +108,7 @@ function updateLoop() {
                     const moveVector = currentPinchPos.subtract(lastLeftHandPos);
                     
                     // 【左右位移修正】将 X 轴取反
-                    moveVector.x = -moveVector.x; 
+                    moveVector.x = moveVector.x; 
                     
                     // 应用位移
                     snapshotPanel.position.addInPlace(moveVector);
