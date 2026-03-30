@@ -214,45 +214,17 @@ async function startCamera() {
 }
 
 async function initXR() {
-    try {
-        setStatus("Requesting XR...");
-        
-        xrHelper = await scene.createDefaultXRExperienceAsync({
-            uiOptions: {
-                sessionMode: "immersive-ar",
-                referenceSpaceType: "local-floor",
-                // 确保按钮位置正常
-                onError: (error) => setStatus("XR Error: " + error)
-            },
-            optionalFeatures: true // 必须开启，否则手势追踪无法加载
-        });
-
-        if (!xrHelper.baseExperience) {
-            throw new Error("XR Not Supported on this device/browser");
+    xrHelper = await scene.createDefaultXRExperienceAsync({
+        uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
+    });
+    xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", { xrInput: xrHelper.input });
+    
+    xrHelper.input.onControllerAddedObservable.add((input) => {
+        if (input.inputSource.hand) {
+            if (input.inputSource.handedness === "left") leftHandInput = input;
+            else if (input.inputSource.handedness === "right") rightHandInput = input;
         }
-
-        // 启用手势
-        const featureManager = xrHelper.baseExperience.featuresManager;
-        featureManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", {
-            xrInput: xrHelper.input
-        });
-
-        // 监听手部加入
-        xrHelper.input.onControllerAddedObservable.add((input) => {
-            if (input.inputSource.hand) {
-                const side = input.inputSource.handedness;
-                if (side === "left") leftHandInput = input;
-                else if (side === "right") rightHandInput = input;
-                console.log(side + " hand detected");
-            }
-        });
-
-        setStatus("XR Ready. Click AR button.");
-
-    } catch (e) {
-        console.error(e);
-        setStatus("XR Failed: " + e.message);
-    }
+    });
 }
 
 async function bootstrap() {
