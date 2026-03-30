@@ -10,8 +10,10 @@ let snapshotPanel, snapshotMaterial, snapshotTexture, snapshotTextureCtx;
 let isGrabbingLeft = false; 
 let wasPinchingRight = false;
 let lastPinchTime = 0;
+// 新增：用于记录上一帧手的位置，解决移动反向问题
+let lastLeftHandPos = null; 
 
-// 统一判定阈值 (采用你右手验证成功的 4cm)
+// 判定阈值
 const PINCH_THRESHOLD = 0.02; 
 const COOLDOWN = 1500;
 
@@ -24,9 +26,8 @@ function setStatus(text) {
     console.log(text);
 }
 
-// ---------- 1. 核心算法：获取指尖坐标 (增加保底逻辑) ----------
+// 获取指尖坐标 (保底逻辑)
 function getHandPoint(controller, jointName) {
-    // 1. 尝试获取高精度骨骼关节 (你看到的关节球)
     if (controller?.inputSource?.hand) {
         const joint = controller.inputSource.hand.get(jointName);
         const frame = xrHelper?.baseExperience?.sessionManager?.currentFrame;
@@ -36,59 +37,63 @@ function getHandPoint(controller, jointName) {
             if (pose) return new BABYLON.Vector3(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
         }
     }
-    // 2. 如果骨骼数据瞬间丢失，使用射线起点作为保底坐标
-    return controller.pointer.position;
+    return controller.pointer.position.clone();
 }
 
-// ---------- 2. 核心循环：实时物理判定交互 ----------
+// ---------- 核心修复：解决移动反向的 updateLoop ----------
 function updateLoop() {
     if (!xrHelper || xrHelper.baseExperience.state !== BABYLON.WebXRState.IN_XR) return;
 
     xrHelper.input.controllers.forEach((controller) => {
         const side = controller.inputSource.handedness;
-
-        // 获取该手的拇指和食指坐标
         const thumb = getHandPoint(controller, "thumb-tip");
         const index = getHandPoint(controller, "index-finger-tip");
-        
         if (!thumb || !index) return;
 
-        // 计算物理距离
         const dist = BABYLON.Vector3.Distance(thumb, index);
         const isPinching = dist < PINCH_THRESHOLD;
-        const pinchCenter = BABYLON.Vector3.Center(thumb, index);
+        const currentPinchPos = BABYLON.Vector3.Center(thumb, index);
 
-        // --- 左手逻辑：捏合即强制吸附 ---
+        // --- 左手：修正位移逻辑 ---
         if (side === "left") {
             if (isPinching && snapshotPanel.isEnabled()) {
                 if (!isGrabbingLeft) {
                     isGrabbingLeft = true;
-                    // 视觉反馈：变蓝色
-                    snapshotMaterial.emissiveColor = new BABYLON.Color3(0, 0.7, 1); 
-                    setStatus("左手捏合：面板已强制吸附");
+                    snapshotMaterial.emissiveColor = new BABYLON.Color3(0, 0.7, 1);
+                    setStatus("左手抓取中...");
+                    // 初始吸附：让面板中心直接对齐捏合点
+                    snapshotPanel.setAbsolutePosition(currentPinchPos);
+                } else {
+                    // 【修正位移的关键】
+                    // 1. 如果有上一帧的位置，计算手移动了多少 (delta)
+                    if (lastLeftHandPos) {
+                        const delta = currentPinchPos.subtract(lastLeftHandPos);
+                        // 2. 将这个位移应用到面板当前的绝对坐标上
+                        snapshotPanel.position.addInPlace(delta);
+                    }
                 }
+                // 记录当前位置供下一帧使用
+                lastLeftHandPos = currentPinchPos.clone();
                 
-                // 【核心改进】直接把面板坐标设为左手捏合点，实现“隔空吸附”
-                snapshotPanel.setAbsolutePosition(pinchCenter);
-                // 始终面向用户，避免镜像反向感
+                // 面板面向用户
                 snapshotPanel.lookAt(xrHelper.baseExperience.camera.globalPosition, Math.PI);
             } else {
                 if (isGrabbingLeft) {
                     isGrabbingLeft = false;
-                    // 恢复白色
-                    snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1); 
-                    setStatus("左手松开：已放置面板");
+                    lastLeftHandPos = null; // 重置
+                    snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
+                    setStatus("左手已放开");
                 }
             }
         } 
         
-        // --- 右手逻辑：Pinch 截图 (你验证过最稳的逻辑) ---
+        // --- 右手：截图逻辑保持不变 ---
         else if (side === "right") {
             if (isPinching && !wasPinchingRight) {
                 if (performance.now() - lastPinchTime > COOLDOWN) {
                     lastPinchTime = performance.now();
                     takeSnapshot();
-                    setStatus("右手 Pinch：快照成功");
+                    setStatus("右手截图成功");
                 }
             }
             wasPinchingRight = isPinching;
@@ -96,14 +101,13 @@ function updateLoop() {
     });
 }
 
-// ---------- 3. 截图功能 (带自动保存) ----------
+// 截图功能
 function takeSnapshot() {
     if (!video.videoWidth) return;
     const ctx = snapshotTextureCtx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, PANEL_TEX_SIZE, PANEL_TEX_SIZE);
     
-    // 修正镜像并绘制
     ctx.save();
     ctx.translate(PANEL_TEX_SIZE / 2, PANEL_TEX_SIZE / 2);
     ctx.scale(-1, 1); 
@@ -113,36 +117,27 @@ function takeSnapshot() {
     
     snapshotTexture.update();
     
-    // 面板出现在眼前 0.5 米处
     const cam = xrHelper.baseExperience.camera;
     const forward = cam.getForwardRay(1).direction;
     snapshotPanel.position = cam.globalPosition.add(forward.scale(0.5));
     snapshotPanel.lookAt(cam.globalPosition, Math.PI); 
     snapshotPanel.setEnabled(true);
 
-    // 触发下载
     const link = document.createElement("a");
     link.href = snapshotTexture.getContext().canvas.toDataURL("image/jpeg");
     link.download = `Snapshot_${Date.now()}.jpg`;
     link.click();
 }
 
-// ---------- 4. 启动与初始化 ----------
 async function initXR() {
     try {
         xrHelper = await scene.createDefaultXRExperienceAsync({
             uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
         });
-        
-        // 开启手势追踪
         xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", {
             xrInput: xrHelper.input
         });
-        
-        setStatus("XR 就绪，请进入 AR 模式");
-    } catch (e) {
-        setStatus("XR 初始化失败");
-    }
+    } catch (e) { setStatus("XR 初始化失败"); }
 }
 
 async function bootstrap() {
@@ -151,16 +146,9 @@ async function bootstrap() {
     scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);
     new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
 
-    // 面板初始化
-    snapshotPanel = BABYLON.MeshBuilder.CreatePlane("sPanel", { 
-        width: PANEL_WORLD_WIDTH, 
-        height: PANEL_WORLD_HEIGHT, 
-        sideOrientation: BABYLON.Mesh.DOUBLESIDE 
-    }, scene);
-    
+    snapshotPanel = BABYLON.MeshBuilder.CreatePlane("sPanel", { width: PANEL_WORLD_WIDTH, height: PANEL_WORLD_HEIGHT, sideOrientation: BABYLON.Mesh.DOUBLESIDE }, scene);
     snapshotTexture = new BABYLON.DynamicTexture("sTex", { width: PANEL_TEX_SIZE, height: PANEL_TEX_SIZE }, scene);
     snapshotTextureCtx = snapshotTexture.getContext();
-    
     snapshotMaterial = new BABYLON.StandardMaterial("sMat", scene);
     snapshotMaterial.diffuseTexture = snapshotTexture;
     snapshotMaterial.emissiveColor = new BABYLON.Color3(1, 1, 1);
@@ -168,7 +156,6 @@ async function bootstrap() {
     snapshotPanel.material = snapshotMaterial;
     snapshotPanel.setEnabled(false);
 
-    // 启动摄像头
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
         video.srcObject = stream;
@@ -176,11 +163,7 @@ async function bootstrap() {
     } catch (e) { setStatus("摄像头开启失败"); }
 
     await initXR();
-    
-    engine.runRenderLoop(() => {
-        updateLoop();
-        scene.render();
-    });
+    engine.runRenderLoop(() => { updateLoop(); scene.render(); });
 }
 
 bootstrap();
