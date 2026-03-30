@@ -20,11 +20,9 @@ let snapshotTextureCtx = null;
 // interaction state
 let mode = "browse"; // browse | draw
 let isDrawing = false;
-let lastDrawPoint = null;
-
-// grab gesture toggles draw mode
-let isGrabGestureActive = false;
-let activeGrabHand = null;
+let isGrabbing = false;
+let lastDrawUV = null;
+let currentGrabHand = null;
 
 // camera
 let currentCameraStream = null;
@@ -32,18 +30,15 @@ let currentCameraStream = null;
 // pinch state
 let leftHandInput = null;
 let rightHandInput = null;
-
-// 更严格的 pinch 判定
-let pinchThreshold = 0.025;        // 触发 pinch：2.5cm
-let pinchReleaseThreshold = 0.04;  // 必须先张开到 4cm 以上才允许下一次 pinch
+let pinchThreshold = 0.04;
 let pinchCooldownMs = 1200;
 let lastPinchTime = 0;
+let wasPinchingLeft = false;
+let wasPinchingRight = false;
 
-// armed 机制：必须先 release，再 pinch
-let leftPinchArmed = false;
-let rightPinchArmed = false;
-let leftPinchState = false;
-let rightPinchState = false;
+// poke state
+let lastPokeTime = 0;
+let pokeCooldownMs = 700;
 
 // fist / grab state
 let fistThreshold = 0.09;
@@ -103,23 +98,28 @@ function getCameraPoseVectors() {
   return { cam, camPos, forward, up, right };
 }
 
-// 视线左边，持续跟随
-function placePanelAtLeftFollow() {
+function placePanelAtRightFront() {
   const data = getCameraPoseVectors();
   if (!data || !snapshotPanel) return;
 
   const { camPos, forward, right } = data;
-  const left = right.scale(-1);
-
-  const forwardOffset = 0.58;
-  const leftOffset = 0.36;      // 原来 0.26，现在更靠左
-  const verticalOffset = -0.02; // 稍微低一点，可自行调成 0
 
   const targetPos = camPos
-    .add(forward.scale(forwardOffset))
-    .add(left.scale(leftOffset))
-    .add(new BABYLON.Vector3(0, verticalOffset, 0));
+    .add(forward.scale(0.62))
+    .add(right.scale(0.28));
 
+  snapshotPanel.position.copyFrom(targetPos);
+  snapshotPanel.lookAt(camPos);
+  snapshotPanel.setEnabled(true);
+}
+
+function placePanelInFront() {
+  const data = getCameraPoseVectors();
+  if (!data || !snapshotPanel) return;
+
+  const { camPos, forward } = data;
+
+  const targetPos = camPos.add(forward.scale(0.55));
   snapshotPanel.position.copyFrom(targetPos);
   snapshotPanel.lookAt(camPos);
   snapshotPanel.setEnabled(true);
@@ -136,23 +136,16 @@ function drawPlaceholder() {
   ctx.fillText("SNAPSHOT", 120, 220);
 
   ctx.font = "40px Arial";
-  ctx.fillText("pinch = new snapshot", 120, 320);
-  ctx.fillText("grab snapshot = toggle draw", 120, 390);
-  ctx.fillText("finger draws only on panel", 120, 460);
+  ctx.fillText("enter XR, then pinch", 120, 320);
+  ctx.fillText("same panel updates", 120, 390);
+  ctx.fillText("poke panel = draw mode", 120, 460);
 
   snapshotTexture.update();
   updatePreviewFromTexture();
 }
 
-function clearDrawingState() {
-  isDrawing = false;
-  lastDrawPoint = null;
-}
-
-function toggleDrawMode() {
-  mode = mode === "browse" ? "draw" : "browse";
-  clearDrawingState();
-  setStatus(`Mode: ${mode}`);
+function clearInkByRebuildingSnapshot() {
+  updateSnapshotFromCurrentVideoFrame();
 }
 
 // ---------- scene ----------
@@ -202,7 +195,7 @@ function createSnapshotPanel() {
     scene
   );
 
-  snapshotPanel.isPickable = false;
+  snapshotPanel.isPickable = true;
   snapshotPanel.setEnabled(false);
 
   snapshotTexture = new BABYLON.DynamicTexture(
@@ -297,14 +290,11 @@ async function startCamera() {
   }
 }
 
-// 每次 pinch 都是新的截图，旧画全部清掉
 function updateSnapshotFromCurrentVideoFrame() {
   if (!video.videoWidth || !video.videoHeight) {
     setStatus("No camera frame available");
     return;
   }
-
-  clearDrawingState();
 
   const ctx = snapshotTextureCtx;
   ctx.clearRect(0, 0, PANEL_TEX_WIDTH, PANEL_TEX_HEIGHT);
@@ -343,11 +333,9 @@ function updateSnapshotFromCurrentVideoFrame() {
 
   snapshotTexture.update();
   updatePreviewFromTexture();
+  placePanelAtRightFront();
 
-  snapshotPanel.setEnabled(true);
-  placePanelAtLeftFollow();
-
-  setStatus(`Snapshot updated (mode=${mode})`);
+  setStatus("Snapshot updated");
 }
 
 // ---------- XR ----------
@@ -368,13 +356,7 @@ async function initXR() {
   xrHelper.baseExperience.onStateChangedObservable.add((state) => {
     if (state === BABYLON.WebXRState.IN_XR) {
       setStatus("Entered AR");
-      snapshotPanel.setEnabled(false);
-
-      // 进入 XR 时重置 pinch 状态，避免刚进来误触发
-      leftPinchArmed = false;
-      rightPinchArmed = false;
-      leftPinchState = false;
-      rightPinchState = false;
+      placePanelAtRightFront();
     } else if (state === BABYLON.WebXRState.ENTERING_XR) {
       setStatus("Entering AR...");
     } else if (state === BABYLON.WebXRState.EXITING_XR) {
@@ -399,58 +381,153 @@ function tryEnableHandTracking() {
       if (inputSource.inputSource && inputSource.inputSource.hand) {
         if (inputSource.inputSource.handedness === "left") {
           leftHandInput = inputSource;
-          leftPinchArmed = false;
-          leftPinchState = false;
           console.log("Left hand detected");
         } else if (inputSource.inputSource.handedness === "right") {
           rightHandInput = inputSource;
-          rightPinchArmed = false;
-          rightPinchState = false;
           console.log("Right hand detected");
         }
       }
     });
 
     xrHelper.input.onControllerRemovedObservable.add((inputSource) => {
-      if (leftHandInput === inputSource) {
-        leftHandInput = null;
-        leftPinchArmed = false;
-        leftPinchState = false;
-      }
-      if (rightHandInput === inputSource) {
-        rightHandInput = null;
-        rightPinchArmed = false;
-        rightPinchState = false;
-      }
+      if (leftHandInput === inputSource) leftHandInput = null;
+      if (rightHandInput === inputSource) rightHandInput = null;
     });
   } catch (err) {
     console.warn("Hand tracking not enabled:", err);
   }
 }
 
-// ---------- no pointer drawing in this version ----------
+// ---------- pointer / draw ----------
+function getPanelUVFromPointer(pointerInfo) {
+  if (!pointerInfo.pickInfo || !pointerInfo.pickInfo.hit) return null;
+  if (pointerInfo.pickInfo.pickedMesh !== snapshotPanel) return null;
+
+  if (typeof pointerInfo.pickInfo.getTextureCoordinates === "function") {
+    const uv = pointerInfo.pickInfo.getTextureCoordinates();
+    if (uv) return uv;
+  }
+
+  if (
+    pointerInfo.pickInfo.bu !== undefined &&
+    pointerInfo.pickInfo.bv !== undefined
+  ) {
+    return new BABYLON.Vector2(pointerInfo.pickInfo.bu, pointerInfo.pickInfo.bv);
+  }
+
+  return null;
+}
+
+function uvToCanvasPoint(uv) {
+  if (!uv) return null;
+  return {
+    x: uv.x * PANEL_TEX_WIDTH,
+    y: (1 - uv.y) * PANEL_TEX_HEIGHT,
+  };
+}
+
+function drawDotAtUV(uv) {
+  const pt = uvToCanvasPoint(uv);
+  if (!pt) return;
+
+  const ctx = snapshotTextureCtx;
+  ctx.fillStyle = "#ff3b30";
+  ctx.beginPath();
+  ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2);
+  ctx.fill();
+
+  snapshotTexture.update();
+  updatePreviewFromTexture();
+}
+
+function drawLineUV(uv1, uv2) {
+  const p1 = uvToCanvasPoint(uv1);
+  const p2 = uvToCanvasPoint(uv2);
+  if (!p1 || !p2) return;
+
+  const ctx = snapshotTextureCtx;
+  ctx.strokeStyle = "#ff3b30";
+  ctx.lineWidth = 8;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  ctx.beginPath();
+  ctx.moveTo(p1.x, p1.y);
+  ctx.lineTo(p2.x, p2.y);
+  ctx.stroke();
+
+  snapshotTexture.update();
+  updatePreviewFromTexture();
+}
+
+function toggleDrawMode() {
+  mode = mode === "browse" ? "draw" : "browse";
+  isDrawing = false;
+  lastDrawUV = null;
+  setStatus(`Mode: ${mode}`);
+}
+
 function setupPointerLogic() {
-  // 这版完全不用射线/鼠标来绘画
+  scene.onPointerObservable.add((pointerInfo) => {
+    const type = pointerInfo.type;
+    const uv = getPanelUVFromPointer(pointerInfo);
+
+    // poke panel to toggle draw
+    if (type === BABYLON.PointerEventTypes.POINTERDOWN) {
+      if (
+        pointerInfo.pickInfo &&
+        pointerInfo.pickInfo.hit &&
+        pointerInfo.pickInfo.pickedMesh === snapshotPanel
+      ) {
+        const now = nowMs();
+        if (now - lastPokeTime > pokeCooldownMs) {
+          lastPokeTime = now;
+          toggleDrawMode();
+        }
+
+        if (mode === "draw" && uv) {
+          isDrawing = true;
+          lastDrawUV = uv;
+          drawDotAtUV(uv);
+        }
+      }
+      return;
+    }
+
+    if (type === BABYLON.PointerEventTypes.POINTERMOVE) {
+      if (mode !== "draw") return;
+      if (!isDrawing) return;
+      if (!uv) {
+        lastDrawUV = null;
+        return;
+      }
+
+      if (lastDrawUV) {
+        drawLineUV(lastDrawUV, uv);
+      } else {
+        drawDotAtUV(uv);
+      }
+      lastDrawUV = uv;
+      return;
+    }
+
+    if (type === BABYLON.PointerEventTypes.POINTERUP) {
+      isDrawing = false;
+      lastDrawUV = null;
+    }
+  });
 }
 
 // ---------- hand joints ----------
 function getXRFrame() {
-  if (
-    !xrHelper ||
-    !xrHelper.baseExperience ||
-    !xrHelper.baseExperience.sessionManager
-  ) {
+  if (!xrHelper || !xrHelper.baseExperience || !xrHelper.baseExperience.sessionManager) {
     return null;
   }
   return xrHelper.baseExperience.sessionManager.currentFrame || null;
 }
 
 function getXRReferenceSpace() {
-  if (
-    !xrHelper ||
-    !xrHelper.baseExperience ||
-    !xrHelper.baseExperience.sessionManager
-  ) {
+  if (!xrHelper || !xrHelper.baseExperience || !xrHelper.baseExperience.sessionManager) {
     return null;
   }
   return (
@@ -484,12 +561,12 @@ function getJointPosition(handInput, jointName) {
   }
 }
 
-function getPinchDistance(handInput) {
+function detectPinch(handInput) {
   const thumbTip = getJointPosition(handInput, "thumb-tip");
   const indexTip = getJointPosition(handInput, "index-finger-tip");
 
-  if (!thumbTip || !indexTip) return null;
-  return BABYLON.Vector3.Distance(thumbTip, indexTip);
+  if (!thumbTip || !indexTip) return false;
+  return BABYLON.Vector3.Distance(thumbTip, indexTip) < pinchThreshold;
 }
 
 function detectFist(handInput) {
@@ -505,116 +582,19 @@ function detectFist(handInput) {
     (BABYLON.Vector3.Distance(wrist, indexTip) +
       BABYLON.Vector3.Distance(wrist, middleTip) +
       BABYLON.Vector3.Distance(wrist, ringTip) +
-      BABYLON.Vector3.Distance(wrist, pinkyTip)) / 4;
+      BABYLON.Vector3.Distance(wrist, pinkyTip)) /
+    4;
 
   return avg < fistThreshold;
 }
 
 function isHandNearPanel(handInput) {
   const wrist = getJointPosition(handInput, "wrist");
-  if (!wrist || !snapshotPanel || !snapshotPanel.isEnabled()) return false;
+  if (!wrist || !snapshotPanel) return false;
   return BABYLON.Vector3.Distance(wrist, snapshotPanel.position) < 0.28;
 }
 
-// ---------- drawing by finger only on panel ----------
-function getIndexFingerPanelUV(handInput) {
-  const finger = getJointPosition(handInput, "index-finger-tip");
-  if (!finger || !snapshotPanel || !snapshotPanel.isEnabled()) return null;
-
-  const inv = BABYLON.Matrix.Invert(snapshotPanel.computeWorldMatrix(true));
-  const local = BABYLON.Vector3.TransformCoordinates(finger, inv);
-
-  const inside =
-    local.x >= -PANEL_HALF_W &&
-    local.x <= PANEL_HALF_W &&
-    local.y >= -PANEL_HALF_H &&
-    local.y <= PANEL_HALF_H &&
-    Math.abs(local.z) < 0.03;
-
-  if (!inside) return null;
-
-  const u = (local.x + PANEL_HALF_W) / PANEL_WORLD_WIDTH;
-  const v = (local.y + PANEL_HALF_H) / PANEL_WORLD_HEIGHT;
-
-  return new BABYLON.Vector2(u, v);
-}
-
-function uvToCanvasPoint(uv) {
-  if (!uv) return null;
-  return {
-    x: uv.x * PANEL_TEX_WIDTH,
-    y: (1 - uv.y) * PANEL_TEX_HEIGHT,
-  };
-}
-
-function drawDotAtUV(uv) {
-  const pt = uvToCanvasPoint(uv);
-  if (!pt) return;
-
-  const ctx = snapshotTextureCtx;
-  ctx.fillStyle = "#ff3b30";
-  ctx.beginPath();
-  ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2);
-  ctx.fill();
-
-  snapshotTexture.update();
-  updatePreviewFromTexture();
-}
-
-function drawLinePoints(p1, p2) {
-  if (!p1 || !p2) return;
-
-  const ctx = snapshotTextureCtx;
-  ctx.strokeStyle = "#ff3b30";
-  ctx.lineWidth = 8;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-
-  ctx.beginPath();
-  ctx.moveTo(p1.x, p1.y);
-  ctx.lineTo(p2.x, p2.y);
-  ctx.stroke();
-
-  snapshotTexture.update();
-  updatePreviewFromTexture();
-}
-
-function updateFingerDrawing() {
-  if (mode !== "draw") {
-    clearDrawingState();
-    return;
-  }
-
-  const drawingHand = rightHandInput || leftHandInput;
-  if (!drawingHand) {
-    clearDrawingState();
-    return;
-  }
-
-  const uv = getIndexFingerPanelUV(drawingHand);
-
-  // 手指离开 snapshot 范围，不画
-  if (!uv) {
-    clearDrawingState();
-    return;
-  }
-
-  const pt = uvToCanvasPoint(uv);
-
-  if (!isDrawing) {
-    isDrawing = true;
-    lastDrawPoint = pt;
-    drawDotAtUV(uv);
-    return;
-  }
-
-  drawLinePoints(lastDrawPoint, pt);
-  lastDrawPoint = pt;
-}
-
 // ---------- XR interactions ----------
-
-// 必须先 release，再 pinch，才触发新的 snapshot
 function maybeTriggerSnapshotFromPinch() {
   if (
     !xrHelper ||
@@ -624,58 +604,28 @@ function maybeTriggerSnapshotFromPinch() {
     return;
   }
 
+  if (mode !== "browse") return;
+  if (isGrabbing) return;
+
   const now = nowMs();
 
-  const leftDist = getPinchDistance(leftHandInput);
-  const rightDist = getPinchDistance(rightHandInput);
+  const leftPinching = detectPinch(leftHandInput);
+  const rightPinching = detectPinch(rightHandInput);
 
-  // LEFT
-  if (leftDist !== null) {
-    if (leftDist > pinchReleaseThreshold) {
-      leftPinchArmed = true;
-      leftPinchState = false;
-    } else if (
-      leftPinchArmed &&
-      leftDist < pinchThreshold &&
-      !leftPinchState &&
-      now - lastPinchTime > pinchCooldownMs
-    ) {
-      lastPinchTime = now;
-      leftPinchState = true;
-      leftPinchArmed = false;
+  const leftRising = leftPinching && !wasPinchingLeft;
+  const rightRising = rightPinching && !wasPinchingRight;
 
-      updateSnapshotFromCurrentVideoFrame();
-      placePanelAtLeftFollow();
-      setStatus(`Snapshot updated by LEFT pinch (mode=${mode})`);
-      return;
-    }
+  if ((leftRising || rightRising) && now - lastPinchTime > pinchCooldownMs) {
+    lastPinchTime = now;
+    updateSnapshotFromCurrentVideoFrame();
+    setStatus("Snapshot updated by pinch");
   }
 
-  // RIGHT
-  if (rightDist !== null) {
-    if (rightDist > pinchReleaseThreshold) {
-      rightPinchArmed = true;
-      rightPinchState = false;
-    } else if (
-      rightPinchArmed &&
-      rightDist < pinchThreshold &&
-      !rightPinchState &&
-      now - lastPinchTime > pinchCooldownMs
-    ) {
-      lastPinchTime = now;
-      rightPinchState = true;
-      rightPinchArmed = false;
-
-      updateSnapshotFromCurrentVideoFrame();
-      placePanelAtLeftFollow();
-      setStatus(`Snapshot updated by RIGHT pinch (mode=${mode})`);
-      return;
-    }
-  }
+  wasPinchingLeft = leftPinching;
+  wasPinchingRight = rightPinching;
 }
 
-// 抓住 snapshot 一次 = 进入/退出 draw
-function updateGrabToggleDraw() {
+function updateGrabMove() {
   if (
     !xrHelper ||
     !xrHelper.baseExperience ||
@@ -687,36 +637,34 @@ function updateGrabToggleDraw() {
   const leftFist = detectFist(leftHandInput);
   const rightFist = detectFist(rightHandInput);
 
-  const leftNear = leftHandInput && isHandNearPanel(leftHandInput);
-  const rightNear = rightHandInput && isHandNearPanel(rightHandInput);
+  if (isGrabbing) {
+    const activeHand = currentGrabHand === "left" ? leftHandInput : rightHandInput;
+    const stillFist = currentGrabHand === "left" ? leftFist : rightFist;
+    const wrist = getJointPosition(activeHand, "wrist");
 
-  if (!isGrabGestureActive) {
-    if (leftFist && leftNear) {
-      isGrabGestureActive = true;
-      activeGrabHand = "left";
-      toggleDrawMode();
+    if (!stillFist || !wrist) {
+      isGrabbing = false;
+      currentGrabHand = null;
       return;
     }
 
-    if (rightFist && rightNear) {
-      isGrabGestureActive = true;
-      activeGrabHand = "right";
-      toggleDrawMode();
-      return;
-    }
-
+    snapshotPanel.position.copyFrom(wrist);
+    const data = getCameraPoseVectors();
+    if (data) snapshotPanel.lookAt(data.camPos);
     return;
   }
 
-  if (activeGrabHand === "left" && !leftFist) {
-    isGrabGestureActive = false;
-    activeGrabHand = null;
+  if (leftFist && isHandNearPanel(leftHandInput)) {
+    isGrabbing = true;
+    currentGrabHand = "left";
+    placePanelInFront();
     return;
   }
 
-  if (activeGrabHand === "right" && !rightFist) {
-    isGrabGestureActive = false;
-    activeGrabHand = null;
+  if (rightFist && isHandNearPanel(rightHandInput)) {
+    isGrabbing = true;
+    currentGrabHand = "right";
+    placePanelInFront();
   }
 }
 
@@ -734,15 +682,8 @@ async function bootstrap() {
   await initXR();
 
   engine.runRenderLoop(() => {
-    // panel 已经生成后，持续跟随到左前方
-    if (snapshotPanel && snapshotPanel.isEnabled()) {
-      placePanelAtLeftFollow();
-    }
-
     maybeTriggerSnapshotFromPinch();
-    updateGrabToggleDraw();
-    updateFingerDrawing();
-
+    updateGrabMove();
     scene.render();
   });
 
