@@ -12,7 +12,7 @@ let snapshotPanel, snapshotMaterial, snapshotTexture, snapshotTextureCtx;
 
 // 交互状态
 let isDrawing = false;
-let isGrabbing = false; // 左手搬运
+let isGrabbing = false; 
 let lastDrawUV = null;
 
 let currentCameraStream = null;
@@ -22,7 +22,7 @@ let rightHandInput = null;
 // 阈值
 const pinchThreshold = 0.04;
 const pinchCooldownMs = 1200;
-const grabDistanceThreshold = 0.35; // 稍微调大一点，方便抓取
+const grabDistanceThreshold = 0.4; 
 
 let lastPinchTime = 0;
 let wasPinchingRight = false;
@@ -46,7 +46,6 @@ function updatePreviewFromTexture() {
     previewCtx.drawImage(snapshotTexture.getContext().canvas, 0, 0, 512, 512);
 }
 
-// 保存截图
 function saveSnapshotToLocal() {
     try {
         const canvasToSave = snapshotTexture.getContext().canvas;
@@ -57,12 +56,12 @@ function saveSnapshotToLocal() {
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-        setStatus("Saved!");
+        setStatus("Saved to Device!");
     } catch (e) { setStatus("Save Failed"); }
 }
 
 function getCameraPoseVectors() {
-    let cam = (xrHelper?.baseExperience?.state === BABYLON.WebXRState.IN_XR) 
+    const cam = (xrHelper?.baseExperience?.state === BABYLON.WebXRState.IN_XR) 
         ? xrHelper.baseExperience.camera 
         : scene.activeCamera;
     if (!cam) return null;
@@ -76,7 +75,7 @@ function placePanelAtCurrentView() {
     if (!data || !snapshotPanel) return;
     const targetPos = data.camPos.add(data.forward.scale(0.6));
     snapshotPanel.position.copyFrom(targetPos);
-    snapshotPanel.lookAt(data.camPos);
+    snapshotPanel.lookAt(data.camPos, Math.PI); 
     snapshotPanel.setEnabled(true);
 }
 
@@ -116,15 +115,16 @@ function updateSnapshotFromCurrentVideoFrame() {
     saveSnapshotToLocal();
 }
 
-// ---------- 画笔逻辑 (修正：仅允许右手画画) ----------
+// ---------- 画笔逻辑 (修正：安全地过滤左手) ----------
 function setupPointerLogic() {
     scene.onPointerObservable.add((pointerInfo) => {
-        // 关键修复：检查触发事件的输入源
-        // 在 WebXR 中，可以通过 pointerId 或 input source 来识别
-        const inputSource = xrHelper?.pointerSelection?.getPointerContext(pointerInfo.event.pointerId)?.inputSource;
-        
-        // 如果能识别到输入源，且它是左手，则直接拦截不许画画
-        if (inputSource && inputSource.handedness === "left") return;
+        // 安全检查：如果还没进入 XR，按普通逻辑
+        if (xrHelper?.baseExperience?.state === BABYLON.WebXRState.IN_XR) {
+            // 获取触发该事件的控制器输入源
+            const inputSource = xrHelper.pointerSelection.getPointerContext(pointerInfo.event.pointerId)?.inputSource;
+            // 只有右手可以画画，左手用于抓取面板
+            if (inputSource && inputSource.handedness === "left") return;
+        }
 
         const type = pointerInfo.type;
         const pickInfo = pointerInfo.pickInfo;
@@ -187,24 +187,22 @@ function getPinchInfo(hand) {
 
 // ---------- 核心循环 ----------
 function updateLoop() {
-    if (!xrHelper) return;
+    if (!xrHelper || xrHelper.baseExperience.state !== BABYLON.WebXRState.IN_XR) return;
 
-    // 1. 左手搬运 (优先级最高)
+    // 1. 左手抓取移动
     const leftPinch = getPinchInfo(leftHandInput);
     if (isGrabbing) {
         if (!leftPinch.isPinching) {
             isGrabbing = false;
-            setStatus("Panel Static");
         } else {
-            snapshotPanel.position.copyFrom(leftPinch.pos);
+            snapshotPanel.setAbsolutePosition(leftPinch.pos);
             const camData = getCameraPoseVectors();
-            if (camData) snapshotPanel.lookAt(camData.camPos);
+            if (camData) snapshotPanel.lookAt(camData.camPos, Math.PI);
         }
-    } else if (leftPinch.isPinching && snapshotPanel.isEnabled()) {
+    } else if (leftPinch.isPinching) {
         const dist = BABYLON.Vector3.Distance(leftPinch.pos, snapshotPanel.position);
         if (dist < grabDistanceThreshold) {
             isGrabbing = true;
-            setStatus("Grabbing...");
         }
     }
 
@@ -228,30 +226,52 @@ async function startCamera() {
         });
         video.srcObject = stream;
         await video.play();
-    } catch (e) { setStatus("Camera error"); }
+        setStatus("Camera OK");
+    } catch (e) { setStatus("Camera Error"); }
 }
 
 async function initXR() {
-    xrHelper = await scene.createDefaultXRExperienceAsync({
-        uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" }
-    });
-    xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", { xrInput: xrHelper.input });
-    
-    xrHelper.input.onControllerAddedObservable.add((input) => {
-        if (input.inputSource.hand) {
-            if (input.inputSource.handedness === "left") leftHandInput = input;
-            else rightHandInput = input;
-        }
-    });
+    try {
+        xrHelper = await scene.createDefaultXRExperienceAsync({
+            uiOptions: { 
+                sessionMode: "immersive-ar", 
+                referenceSpaceType: "local-floor" 
+            }
+        });
+
+        // 只有成功创建后再配置功能
+        xrHelper.baseExperience.featuresManager.enableFeature(BABYLON.WebXRFeatureName.HAND_TRACKING, "latest", { 
+            xrInput: xrHelper.input 
+        });
+        
+        xrHelper.input.onControllerAddedObservable.add((input) => {
+            if (input.inputSource.hand) {
+                const side = input.inputSource.handedness;
+                if (side === "left") leftHandInput = input;
+                else if (side === "right") rightHandInput = input;
+            }
+        });
+        
+        setStatus("XR Initialized. Click the AR icon.");
+    } catch (e) {
+        setStatus("XR Failed: " + e.message);
+    }
 }
 
 async function bootstrap() {
     engine = new BABYLON.Engine(canvas, true);
     scene = new BABYLON.Scene(engine);
     scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);
+    
     new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
 
-    snapshotPanel = BABYLON.MeshBuilder.CreatePlane("snapshotPanel", { width: PANEL_WORLD_WIDTH, height: PANEL_WORLD_HEIGHT, sideOrientation: BABYLON.Mesh.DOUBLESIDE }, scene);
+    // 初始化面板
+    snapshotPanel = BABYLON.MeshBuilder.CreatePlane("snapshotPanel", { 
+        width: PANEL_WORLD_WIDTH, 
+        height: PANEL_WORLD_HEIGHT, 
+        sideOrientation: BABYLON.Mesh.DOUBLESIDE 
+    }, scene);
+    
     snapshotTexture = new BABYLON.DynamicTexture("sTex", { width: PANEL_TEX_WIDTH, height: PANEL_TEX_HEIGHT }, scene);
     snapshotTextureCtx = snapshotTexture.getContext();
     
@@ -263,13 +283,17 @@ async function bootstrap() {
     snapshotPanel.setEnabled(false);
 
     setupPointerLogic();
-    startCamera();
+    
+    // 按顺序启动
+    await startCamera();
     await initXR();
 
     engine.runRenderLoop(() => {
         updateLoop();
         scene.render();
     });
+    
+    window.addEventListener("resize", () => engine.resize());
 }
 
 bootstrap();
