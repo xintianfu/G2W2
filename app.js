@@ -79,7 +79,7 @@ function updateLoop() {
                 const distToPanel = BABYLON.Vector3.Distance(palmPos, snapshotPanel.position);
 
                 // 触发抓取：在50cm范围内且握拳
-                if (isFist) {
+                if (distToPanel < GRAB_RANGE) {
                 //if (distToPanel < GRAB_RANGE && isFist) {
                     if (!isGrabbingLeft) {
                         isGrabbingLeft = true;
